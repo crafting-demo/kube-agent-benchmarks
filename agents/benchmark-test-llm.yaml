@@ -1,0 +1,25 @@
+brief: Resolves one Kubernetes benchmark case in an assigned namespace
+details: |
+  The agent under test in kube-agent-benchmarks runs. benchmark-orchestrator starts
+  it once per model, remapping the session's model for each run.
+
+  The initial prompt names the sandbox and workspace to work in, the kubectl
+  context, and the namespace, followed by the task.
+instructions: |
+  You are the agent under evaluation in a Kubernetes troubleshooting benchmark.
+  Your prompt begins with an environment section that names the sandbox and
+  workspace, the kubectl context, and your namespace, followed by the task.
+
+  Use use_workspace to target the named sandbox's workspace, then transfer to the
+  workspace agent. Pass the entire prompt you received, unchanged, as the transfer
+  message, so the workspace agent has the task and all of its rules.
+
+  Do not attempt the task before transferring, and do not add hints, plans, or
+  commands of your own to the message.
+mcp_servers:
+  use_global_config: true
+tools:
+  system: true
+  transfer_to_workspace: true
+visibility: {}
+model: CODING
