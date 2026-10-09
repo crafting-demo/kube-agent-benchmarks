@@ -40,66 +40,144 @@ The agent runs separately and needs its own Kubernetes access. A namespace separ
 
 ## Prerequisites
 
-- An existing Kubernetes cluster and a connected `kubectl` installation.
-- Permission to create the dedicated namespace, Deployment, and Service, or an existing namespace supplied by an administrator.
+- An existing Kubernetes cluster (any conformant distribution) and `kubectl` configured to reach it. Requires kubectl 1.27 or later; the commands use only standard `kubectl` and POSIX shell.
 - Linux nodes that can pull `python:3.12-slim` from Docker Hub, with room for three of these Pods at once (150 millicores of CPU and 96 MiB of memory requested) during the rollout.
-- Cluster admission policies that allow these resources and settings.
-- An agent with Kubernetes inspection, log access, and Deployment editing or rollout tools.
+- Cluster admission policies that allow these resources and settings. Do not apply a ResourceQuota or LimitRange to the namespace that would prevent the third, surge Pod from being created, and do not run admission webhooks that rewrite readiness probes; either changes the starting state.
+- An agent with Kubernetes inspection, log access, and Deployment editing or rollout tools, plus a way to send an HTTP request to the application for its recovery check (for example `kubectl port-forward`).
+
+Permissions, all namespaced to the scenario's namespace unless noted:
+
+| Who | Needs |
+| --- | --- |
+| Operator running setup and evaluation | Create the namespace (cluster-scoped), or use one an administrator supplies. Create, get, and patch `deployments` and `services`; get and list `replicasets`, `pods`, `pods/log`, and `events`; create `pods/portforward` for the HTTP check; delete for cleanup. |
+| Agent | Get, list, and watch `deployments`, `replicasets`, `pods`, `pods/log`, and `events`; patch and update `deployments` (`kubectl rollout undo` reads the ReplicaSets and patches the Deployment); create `pods/portforward` or an equivalent way to reach the application. No cluster-scoped permissions are required. |
 
 The image uses a public tag for this initial version. The tag can change; pin an approved image digest before conducting strictly versioned comparisons.
 
 ## Launch
 
-Run from this folder. Confirm the selected cluster first:
+A failed rollout needs a healthy revision to fail from, so setup installs release 1.0.0, waits for it to become healthy, applies release 1.1.0, and waits for the Deployment to report the failure. Setup takes about three to five minutes, mostly the 120-second progress deadline and the first image pull. Do not submit the task to the agent until every step, including the starting-state check, has finished.
+
+Run every command from this folder (`benchmark_cases/broken-rollout`).
+
+### 1. Choose the cluster and namespace
+
+Confirm `kubectl` points at the intended cluster:
 
 ```bash
 kubectl config current-context
 ```
 
-Use the namespace below only if it is reserved for this test. For simultaneous attempts, use a different namespace for each attempt as described below.
-
-A failed rollout needs a healthy revision to fail from, so launch has two steps. Install release 1.0.0 and wait until it is healthy:
+Set the namespace for this attempt. Use `broken-rollout-benchmark` only if it is reserved for this test; for simultaneous or repeated attempts, use a fresh name per attempt.
 
 ```bash
-kubectl apply -f manifests/namespace.yaml
-kubectl apply -n broken-rollout-benchmark -f manifests/deployment-v1.yaml -f manifests/service.yaml
-kubectl rollout status deployment/rollout-demo -n broken-rollout-benchmark --timeout=180s
+NS=broken-rollout-benchmark
 ```
 
-Then apply the faulty release 1.1.0:
+If you keep the default name, create it from the manifest. Otherwise, create the fresh namespace directly and skip `namespace.yaml`:
 
 ```bash
-kubectl apply -n broken-rollout-benchmark -f manifests/deployment-v2.yaml
+kubectl apply -f manifests/namespace.yaml        # default name only
+kubectl create namespace "$NS"                   # any other name
 ```
 
-Do not wait for this rollout: its failure is intentional. One new Pod starts and stays `Running` but `0/1` Ready, with `Readiness probe failed: HTTP probe failed with statuscode: 404` events. The two 1.0.0 Pods stay Ready. After about two minutes, the Deployment's `Progressing` condition becomes `False` with reason `ProgressDeadlineExceeded`. See [Deployment status](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#failed-deployment).
+The Deployment and Service intentionally omit `metadata.namespace` so the `-n` argument selects their destination. If you use another name, replace `broken-rollout-benchmark` in the task prompt and in the evaluation and cleanup commands below.
 
-For consistent starting conditions, wait for `ProgressDeadlineExceeded` before submitting the task:
+The namespace must not already contain a `rollout-demo` Deployment. Applying over an existing one, even a deleted-and-recreated one that has not finished terminating, changes the revision history the scenario depends on. Check with:
 
 ```bash
-kubectl wait deployment/rollout-demo -n broken-rollout-benchmark --for=jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}'=ProgressDeadlineExceeded --timeout=180s
+kubectl get deployment rollout-demo -n "$NS"     # expect: NotFound
 ```
 
-If release 1.0.0 does not become healthy, or the 1.1.0 Pod fails for a reason other than its readiness probe (for example an image pull error or a crash), treat it as a setup issue rather than the intended failure.
-
-### Using another namespace
-
-Skip `namespace.yaml`, create a fresh namespace, and apply the workload manifests in the same order:
+### 2. Install release 1.0.0 and wait until it is healthy
 
 ```bash
-kubectl create namespace broken-rollout-run-002
-kubectl apply -n broken-rollout-run-002 -f manifests/deployment-v1.yaml -f manifests/service.yaml
-kubectl rollout status deployment/rollout-demo -n broken-rollout-run-002 --timeout=180s
-kubectl apply -n broken-rollout-run-002 -f manifests/deployment-v2.yaml
+kubectl apply -n "$NS" -f manifests/deployment-v1.yaml -f manifests/service.yaml
+kubectl rollout status deployment/rollout-demo -n "$NS" --timeout=300s
 ```
 
-Replace `broken-rollout-benchmark` in the task prompt and the commands below with that namespace. The Deployment and Service intentionally omit `metadata.namespace` so the `-n` argument selects their destination.
+Expect `deployment "rollout-demo" successfully rolled out`. The timeout allows for the first pull of `python:3.12-slim`; if the image is already cached on the nodes, this takes a few seconds. Do not continue until this succeeds. Applying release 1.1.0 while 1.0.0 is still rolling out produces a different, unintended starting state.
+
+### 3. Apply the faulty release 1.1.0
+
+Apply it with `kubectl apply` so it updates the existing Deployment in place and creates revision 2. Do not use `kubectl replace --force`, `kubectl create`, or delete the Deployment first; those discard revision 1.
+
+```bash
+kubectl apply -n "$NS" -f manifests/deployment-v2.yaml
+```
+
+Do not run `kubectl rollout status` here without a timeout: this rollout never completes.
+
+### 4. Wait for the progress deadline
+
+The Deployment reports the failure about 120 seconds after the new Pod is created, occasionally a little later because the controller checks the deadline periodically. Wait for it so every attempt starts from the same state:
+
+```bash
+timeout 240 sh -c 'until [ "$(kubectl get deployment rollout-demo -n "$0" -o jsonpath="{.status.conditions[?(@.type==\"Progressing\")].reason}")" = ProgressDeadlineExceeded ]; do sleep 5; done' "$NS" && echo ready
+```
+
+Expect `ready`. If the command times out, see [Setup issues](#setup-issues).
+
+### 5. Verify the starting state
+
+Check the starting state before handing the task to the agent:
+
+```bash
+kubectl get deployment rollout-demo -n "$NS"
+kubectl get replicasets -n "$NS" -l app=rollout-demo
+kubectl get pods -n "$NS" -l app=rollout-demo \
+  -o custom-columns=NAME:.metadata.name,VERSION:.spec.containers[0].env[0].value,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,PHASE:.status.phase
+kubectl rollout history deployment/rollout-demo -n "$NS"
+kubectl get events -n "$NS" --field-selector reason=Unhealthy
+```
+
+| Check | Expected |
+| --- | --- |
+| Deployment | `READY 2/2`, `UP-TO-DATE 1`, `AVAILABLE 2`. |
+| ReplicaSets | Two. The 1.0.0 ReplicaSet has `DESIRED 2`, `CURRENT 2`, `READY 2`. The 1.1.0 ReplicaSet has `DESIRED 1`, `CURRENT 1`, `READY 0`. |
+| Pods | Three, all `Running`. Two with version `1.0.0` and `READY true`; one with version `1.1.0` and `READY false`. All restart counts are `0`. |
+| Rollout history | Revision `1` with `Release 1.0.0` and revision `2` with `Release 1.1.0`. |
+| Events | `Unhealthy` warnings on the 1.1.0 Pod: `Readiness probe failed: HTTP probe failed with statuscode: 404`. |
+| Progressing condition | `False` with reason `ProgressDeadlineExceeded` (step 4). The `Available` condition stays `True`. |
+
+ReplicaSet and Pod names include generated hashes and differ between runs. If any check differs, delete the scenario as described in [Reset and cleanup](#reset-and-cleanup) and start again from step 1; do not hand a mismatched environment to the agent.
+
+### Setup issues
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| Step 2 times out; Pods show `ErrImagePull` or `ImagePullBackOff`. | Nodes cannot reach Docker Hub, or are rate-limited. | Fix registry access or pre-pull the image, then restart setup. |
+| Step 2 times out; Pods are `Pending`. | Insufficient node capacity, or a quota or policy blocks the Pods. | Free capacity or adjust the namespace policy, then restart setup. |
+| The 1.1.0 Pod is never created after step 3. | A ResourceQuota or LimitRange blocks the surge Pod. | Remove the restriction from this namespace and restart setup. |
+| The 1.1.0 Pod becomes Ready, or crashes, or fails for a reason other than a 404 readiness probe. | The wrong manifest was applied, or an admission webhook changed the Pod. | Confirm `deployment-v2.yaml` was applied unmodified, then restart setup. |
+| Rollout history shows only one revision, or more than two. | Release 1.1.0 was applied without release 1.0.0 first, the Deployment was recreated, or a release was applied more than once with changes. | Restart setup in a fresh namespace. |
+| Step 4 times out with `Progressing` still `True`. | The rollout is not stalled as intended. | Inspect the 1.1.0 Pod and its events; restart setup. |
+
+### Scripted setup
+
+For automated runs, such as a Crafting sandbox startup step, the same procedure as one script. It exits nonzero if any step fails. Run it from this folder, passing a fresh namespace name:
+
+```bash
+#!/bin/sh
+set -eu
+NS="${1:?usage: setup.sh NAMESPACE}"
+
+kubectl create namespace "$NS"
+kubectl apply -n "$NS" -f manifests/deployment-v1.yaml -f manifests/service.yaml
+kubectl rollout status deployment/rollout-demo -n "$NS" --timeout=300s
+kubectl apply -n "$NS" -f manifests/deployment-v2.yaml
+timeout 240 sh -c 'until [ "$(kubectl get deployment rollout-demo -n "$0" -o jsonpath="{.status.conditions[?(@.type==\"Progressing\")].reason}")" = ProgressDeadlineExceeded ]; do sleep 5; done' "$NS"
+kubectl get deployment,replicasets,pods -n "$NS" -l app=rollout-demo
+kubectl rollout history deployment/rollout-demo -n "$NS"
+```
+
+The script stops at the starting state and prints it for the run log. It does not compare the output with the expected values above, so review it, or check it in your runner, before submitting the task.
 
 ## Run with your agent
 
 Give the agent the contents of [prompt.md](prompt.md) in a fresh conversation. Use its existing execution platform to execute tools; no separate runner is needed.
 
-For Crafting, configure your sandbox's startup to run both launch steps against its intended Kubernetes target, then start your agent in that environment. Keep the agent's LLM and tools configurable through your agent definition. This folder does not yet include Crafting definitions. See [Crafting agent definitions](https://docs.sandboxes.cloud/references/ai-agent-definition.html).
+For Crafting, configure your sandbox's startup to run the [scripted setup](#scripted-setup) against its intended Kubernetes target, then start your agent in that environment. Keep the agent's LLM and tools configurable through your agent definition. This folder does not yet include Crafting definitions. See [Crafting agent definitions](https://docs.sandboxes.cloud/references/ai-agent-definition.html).
 
 Keep this operator README and any reference solution outside the agent's supplied context. The manifests on disk show the difference between releases, so restrict the agent's filesystem access to setup files when your platform permits it.
 
@@ -153,7 +231,7 @@ kubectl delete -n broken-rollout-benchmark deployment/rollout-demo service/rollo
 kubectl wait -n broken-rollout-benchmark --for=delete pod -l app=rollout-demo --timeout=120s
 ```
 
-After deletion finishes, repeat both launch steps to start again with the fault configured. Deleting the Deployment removes its revision history; reapplying over a recovered Deployment does not reproduce the same history. Use a fresh namespace and conversation for independent comparisons.
+After deletion finishes, repeat [Launch](#launch) from step 2 to start again with the fault configured. Deleting the Deployment removes its revision history; reapplying over a recovered Deployment does not reproduce the same history. Use a fresh namespace and conversation for independent comparisons.
 
 If the namespace was created exclusively for this attempt and contains nothing you need to retain, remove it too:
 
