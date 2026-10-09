@@ -1,0 +1,11 @@
+# benchmark-k8s sandbox definition
+# The checkout uses the GitHub integration so the sandbox's git credential
+# helper can authenticate fetches and pushes to this repository.
+workspaces:
+  - name: app
+    checkouts:
+      - path: kube-agent-benchmarks
+        repo:
+          github:
+            org: crafting-demo
+            repo: kube-agent-benchmarks
