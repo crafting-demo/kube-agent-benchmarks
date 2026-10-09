@@ -1,10 +1,11 @@
 brief: Resolves one Kubernetes benchmark case in an assigned namespace
 details: |
-  The agent under test in kube-agent-benchmarks runs. benchmark-orchestrator starts
-  it once per model, remapping the session's model for each run.
+  The agent under test in kube-agent-benchmarks runs. benchmark-orchestrator-agent
+  starts it once per model, remapping the session's model for each run. Each run
+  has its own sandbox, created from the benchmark-k8s-run template.
 
-  The initial prompt names the sandbox and workspace to work in, the kubectl
-  context, and the namespace, followed by the task.
+  The initial prompt names the run's sandbox and workspace, the kubectl context,
+  and the namespace, followed by the task.
 instructions: |
   You are the agent under evaluation in a Kubernetes troubleshooting benchmark.
   Your prompt begins with an environment section that names the sandbox and
