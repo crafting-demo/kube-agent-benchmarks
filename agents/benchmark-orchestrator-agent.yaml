@@ -12,8 +12,8 @@ details: |
   - the target cluster, as a kubectl context name;
   - the models to compare, two or more (for example claude-sonnet-5-5,
     openai-gpt-5-4-pro, claude-opus-4-8);
-  - optionally, the orchestrator sandbox to run in, and whether to keep the
-    scenario resources after the run.
+  - optionally, the orchestrator sandbox to run in, token prices for the cost
+    estimate, and whether to keep the scenario resources after the run.
 
   The sub-agent sessions start as children of this session.
 instructions: |
@@ -40,6 +40,7 @@ instructions: |
      kubectl context: <context>
      Models: <models, as the user wrote them>
      Orchestrator sandbox and workspace: <sandbox>/<workspace>
+     Token prices: <prices from the user, or none>
      Keep resources after the run: <yes or no; default no>
 
   Do not set up scenarios, create run sandboxes, launch agents, or evaluate
