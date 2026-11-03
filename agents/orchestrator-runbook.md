@@ -2,6 +2,8 @@
 
 Procedure for running one or more benchmark cases against several LLMs and reporting the results by case. The `benchmark-orchestrator-agent` transfers to the orchestrator sandbox's workspace and follows this runbook there. An operator can follow it by hand the same way.
 
+> **You are the workspace agent.** If you are reading this runbook after a transfer into the orchestrator sandbox's workspace, the transfer has already completed: you are now the workspace agent running inside that sandbox (confirm with `echo $SANDBOX_FULL_NAME` and `hostname`). The transfer is a hand-off of control, not a request to a separate agent — there is no further agent to hand off to, and no transfer message is delivered on top of the hand-off. Execute this runbook yourself here. Running benchmark agents under test are launched later in step 4 as child sessions; they are distinct from you.
+
 The agent under test in each run is `benchmark-sub-agent`, started once per model with the model remapped for that session. Every (case, model) pair runs in its own namespace and its own sandbox, so runs cannot affect each other or existing workloads in the cluster. Run sandboxes are created from the `benchmark-k8s-run` template, which has no checkout of this repository, so the agent under test has no case READMEs or manifests on disk.
 
 ## Inputs

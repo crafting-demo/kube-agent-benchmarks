@@ -77,6 +77,8 @@ To run the benchmark with the included orchestrator, you need:
 
 No separate runner is needed: the orchestrator agent is the runner. It follows `agents/orchestrator-runbook.md`, uses `agents/launch-sub-agents.sh` to start one `benchmark-sub-agent` session per model as a child of its own session, evaluates each run against the case's criteria, and reports the results by case.
 
+> **Agent note:** the `benchmark-orchestrator-agent` runs by transferring into the orchestrator sandbox's workspace and following the runbook there. Once that transfer returns, you *are* the workspace agent in that sandbox; proceed to follow the runbook in place rather than expecting to hand the work off again.
+
 1. Create the orchestrator sandbox from the `benchmark-k8s` template and add the target cluster's context to its `~/.kube/config`.
 2. Edit `agents/prompt.md` with the cases, the kubectl context, the models, and the orchestrator sandbox.
 3. Start the orchestrator:
