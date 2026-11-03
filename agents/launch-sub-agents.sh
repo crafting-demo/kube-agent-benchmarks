@@ -29,11 +29,23 @@ SANDBOX_TEMPLATE=benchmark-k8s-run
 WORKSPACE=app
 WORKSPACE_UID=1000
 SUB_AGENT=benchmark-sub-agent
+SUB_AGENT_DEF="$(dirname "$0")/benchmark-sub-agent.yaml"
 
 # shellcheck source=/dev/null
 . "$RUN_DIR/run.env"
 : "${RUN_ID:?run.env must set RUN_ID}"
 : "${CONTEXT:?run.env must set CONTEXT}"
+
+# `cs llm session run --agent` resolves a personal agent first, else an
+# org-shared one. An org-scoped agent that is neither (no owner, not shared)
+# is listed by `cs llm agent list` but cannot be resolved here. Require the
+# agent to actually resolve, and create it as a personal agent if it does not.
+if ! cs llm agent show "$SUB_AGENT" >/dev/null 2>&1; then
+  echo "Agent $SUB_AGENT does not resolve; creating it as a personal agent"
+  cs llm agent create "$SUB_AGENT" "$SUB_AGENT_DEF" </dev/null
+  cs llm agent show "$SUB_AGENT" >/dev/null 2>&1 ||
+    { echo "Agent $SUB_AGENT still does not resolve after creation" >&2; exit 1; }
+fi
 
 pairs=$(awk -F'\t' -v c="$CASE" '$1 == c' "$RUN_DIR/runs.tsv")
 if [ -z "$pairs" ]; then
