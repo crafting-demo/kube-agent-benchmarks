@@ -1,17 +1,18 @@
 brief: Runs Kubernetes benchmark cases against several LLMs and reports results by case
 details: |
-  Sets up one or more kube-agent-benchmarks cases on an existing cluster, runs the
-  benchmark-sub-agent on each case once per requested model, each in its own
-  namespace and its own sandbox, evaluates every run against the case's criteria,
-  and reports scores organized by case.
+  Sets up one or more kube-agent-benchmarks cases on an existing cluster, runs a
+  per-run copy of the benchmark-sub-agent on each case once per requested model,
+  each in its own namespace and its own sandbox, evaluates every run against the
+  case's criteria, and reports scores organized by case.
 
   Start it with the prompt in the repository's agents/prompt.md, edited for the
   run. The prompt gives:
   - the benchmark cases, by name (folder names under benchmark_cases/, such as
     pending-pod or broken-rollout);
   - the target cluster, as a kubectl context name;
-  - the models to compare, two or more (for example claude-sonnet-5-5,
-    openai-gpt-5-4-pro, claude-opus-4-8);
+  - the models to compare, one or more (for example claude-sonnet-5-5,
+    openai-gpt-5-4-pro, claude-opus-4-8); with one model the run measures that
+    model, with two or more it also compares them;
   - optionally, the orchestrator sandbox to run in, token prices for the cost
     estimate, and whether to keep the scenario resources after the run.
 

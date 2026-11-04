@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Creates the run sandboxes for one benchmark case and starts benchmark-sub-agent
+# Creates the run sandboxes for one benchmark case and starts the per-run agent
 # in each, one session per model. Step 4 of orchestrator-runbook.md runs it once
 # per case, from the orchestrator sandbox.
 #
 # Usage: launch-sub-agents.sh RUN_DIR CASE
 #
 # Reads from RUN_DIR:
-#   run.env                    RUN_ID and CONTEXT
+#   run.env                    RUN_ID, CONTEXT, and SUB_AGENT
 #   kubeconfig                 kubeconfig containing only CONTEXT
 #   models.tsv                 <model-slug> TAB <model selector>
 #   runs.tsv                   <case> TAB <model-slug> TAB <namespace> TAB <sandbox>
 #   <case>/<model-slug>/prompt.md
 #
 # Appends one line per started session to RUN_DIR/launches.tsv:
-#   <case> TAB <model-slug> TAB <session> TAB <sandbox> TAB <launch time, epoch seconds>
+#   <case> TAB <model-slug> TAB <session name> TAB <session id> TAB <sandbox> TAB <launch time, epoch seconds>
 #
 # Every session is started as a task with --parent set to the session running
 # this script ($SANDBOX_LLM_SESSION_ID, set by Crafting in the workspace agent's
@@ -28,23 +28,21 @@ CASE=${2:?$usage}
 SANDBOX_TEMPLATE=benchmark-k8s-run
 WORKSPACE=app
 WORKSPACE_UID=1000
-SUB_AGENT=benchmark-sub-agent
-SUB_AGENT_DEF="$(dirname "$0")/benchmark-sub-agent.yaml"
 
 # shellcheck source=/dev/null
 . "$RUN_DIR/run.env"
 : "${RUN_ID:?run.env must set RUN_ID}"
 : "${CONTEXT:?run.env must set CONTEXT}"
+: "${SUB_AGENT:?run.env must set SUB_AGENT}"
 
-# `cs llm session run --agent` resolves a personal agent first, else an
-# org-shared one. An org-scoped agent that is neither (no owner, not shared)
-# is listed by `cs llm agent list` but cannot be resolved here. Require the
-# agent to actually resolve, and create it as a personal agent if it does not.
+# The per-run agent (benchmark-sub-agent-$RUN_ID) is created fresh from
+# agents/benchmark-sub-agent.yaml in step 1 of the runbook, as a personal agent
+# so `cs llm session run --agent` resolves it. This script does not create it;
+# it only requires that it resolves. Creating it per run avoids reusing a stale
+# or non-resolving agent left over from a previous run or made in the UI.
 if ! cs llm agent show "$SUB_AGENT" >/dev/null 2>&1; then
-  echo "Agent $SUB_AGENT does not resolve; creating it as a personal agent"
-  cs llm agent create "$SUB_AGENT" "$SUB_AGENT_DEF" </dev/null
-  cs llm agent show "$SUB_AGENT" >/dev/null 2>&1 ||
-    { echo "Agent $SUB_AGENT still does not resolve after creation" >&2; exit 1; }
+  echo "Agent $SUB_AGENT does not resolve; create it in step 1 before launching" >&2
+  exit 1
 fi
 
 pairs=$(awk -F'\t' -v c="$CASE" '$1 == c' "$RUN_DIR/runs.tsv")
@@ -116,6 +114,13 @@ while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
     --approval auto \
     -W "$sandbox/$WORKSPACE" \
     --wait=false </dev/null
-  printf '%s\t%s\t%s\t%s\t%s\n' "$CASE" "$slug" "$session" "$sandbox" "$launched" >>"$RUN_DIR/launches.tsv"
-  echo "Started $session on $model in $sandbox"
+  # The child session is addressed later by ID, not by name, so resolve and
+  # record it. It is a child of $SANDBOX_LLM_SESSION_ID with display name
+  # "sub-agent:$session".
+  session_id=$(cs llm session list --parent "${SANDBOX_LLM_SESSION_ID:-}" -o json 2>/dev/null |
+    awk -v n="sub-agent:$session" '
+      /"id"/ { gsub(/[",]/,""); id=$2 }
+      index($0, n) { print id; exit }')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$CASE" "$slug" "$session" "${session_id:-}" "$sandbox" "$launched" >>"$RUN_DIR/launches.tsv"
+  echo "Started $session (${session_id:-unknown id}) on $model in $sandbox"
 done 3<<<"$pairs"

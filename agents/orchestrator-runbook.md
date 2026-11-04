@@ -4,7 +4,11 @@ Procedure for running one or more benchmark cases against several LLMs and repor
 
 > **You are the workspace agent.** If you are reading this runbook after a transfer into the orchestrator sandbox's workspace, the transfer has already completed: you are now the workspace agent running inside that sandbox (confirm with `echo $SANDBOX_FULL_NAME` and `hostname`). The transfer is a hand-off of control, not a request to a separate agent — there is no further agent to hand off to, and no transfer message is delivered on top of the hand-off. Execute this runbook yourself here. Running benchmark agents under test are launched later in step 4 as child sessions; they are distinct from you.
 
-The agent under test in each run is `benchmark-sub-agent`, started once per model with the model remapped for that session. Every (case, model) pair runs in its own namespace and its own sandbox, so runs cannot affect each other or existing workloads in the cluster. Run sandboxes are created from the `benchmark-k8s-run` template, which has no checkout of this repository, so the agent under test has no case READMEs or manifests on disk.
+The agent under test in each run is a per-run copy of `benchmark-sub-agent`, named `benchmark-sub-agent-<RUN_ID>` and created fresh from `agents/benchmark-sub-agent.yaml` in step 1, started once per model with the model remapped for that session. Every (case, model) pair runs in its own namespace and its own sandbox, so runs cannot affect each other or existing workloads in the cluster. Run sandboxes are created from the `benchmark-k8s-run` template, which has no checkout of this repository, so the agent under test has no case READMEs or manifests on disk.
+
+### Run ID
+
+Every run has a **RUN_ID** that identifies it. It is generated once in step 1 and threaded through everything the run creates: the per-run agent name, every namespace and run sandbox name, the run directory and all files under it, and the report. This keeps each run self-identified and avoids name conflicts with objects from other runs or ones created outside the benchmark. Whenever this runbook refers to `$RUN_ID`, it means this same value. Always report results as "results for run ID XXXX".
 
 ## Inputs
 
@@ -53,10 +57,15 @@ cs llm config models list
 
 Match the user's names to the `NAME` column. For example, `claude-sonnet-5-5` is `anthropic:claude-sonnet-5-5` and `openai-gpt-5-4-pro` is `openai:gpt-5.4-pro`. If a name matches no model, or more than one, ask the user. For each model, derive a slug from the part after the colon, with dots replaced by dashes (`gpt-5-4-pro`). After creating the run directory below, write one line per model to `$RUN_DIR/models.tsv`: the slug and the exact selector, separated by a tab.
 
-Create the run directory and a kubeconfig that contains only the target context:
+Generate the run ID and use it for everything this run creates:
 
 ```bash
 RUN_ID=$(date +%y%m%d%H%M)
+```
+
+Create the run directory and a kubeconfig that contains only the target context:
+
+```bash
 RUN_DIR=~/benchmark-runs/$RUN_ID
 mkdir -p "$RUN_DIR"
 kubectl config get-contexts "<CONTEXT>"
@@ -66,12 +75,25 @@ kubectl version
 kubectl auth can-i create namespaces
 ```
 
+If `$RUN_DIR` already exists, generate a new `RUN_ID` and try again.
+
+Create the per-run agent under test from the repository definition, so the run always uses the exact definition at this revision and never an agent left over from a previous run or created by hand:
+
+```bash
+SUB_AGENT=benchmark-sub-agent-$RUN_ID
+cs llm agent create "$SUB_AGENT" ~/kube-agent-benchmarks/agents/benchmark-sub-agent.yaml
+cs llm agent show "$SUB_AGENT"
+```
+
+This is a personal agent, so `cs llm session run --agent` resolves it. Record `SUB_AGENT` in `run.env` below.
+
 Save the run settings that the launch script reads:
 
 ```bash
 cat > "$RUN_DIR/run.env" <<EOF
 RUN_ID=$RUN_ID
 CONTEXT=<CONTEXT>
+SUB_AGENT=$SUB_AGENT
 EOF
 ```
 
@@ -98,10 +120,10 @@ Then run the README's starting-state checks against the namespace. If a check fa
 
 ## 3. Build each agent's prompt
 
-Each (case, model) pair gets a run sandbox. Sandbox names are limited to 20 characters, so name it from a short hash of the pair:
+Each (case, model) pair gets a run sandbox. Sandbox names are limited to 20 characters. Number the run's pairs `1`, `2`, … across the whole run (not restarting per case), without zero-padding, and name each sandbox `bench-$RUN_ID-<N>`:
 
 ```bash
-RUN_SANDBOX=b$RUN_ID-$(printf '%s' "<case>/<model-slug>" | sha1sum | cut -c1-6)
+RUN_SANDBOX=bench-$RUN_ID-<N>
 ```
 
 Record each pair's namespace and sandbox in `$RUN_DIR/runs.tsv`, one line per pair: `<case>`, `<model-slug>`, `<NAMESPACE>`, `<RUN_SANDBOX>`, separated by tabs. Later steps look up sandboxes there.
@@ -131,14 +153,14 @@ For every model of the case, the script:
 
 1. Confirms the run sandbox from `runs.tsv` does not exist yet, then creates it from the `benchmark-k8s-run` template and waits until it is ready.
 2. Copies `$RUN_DIR/kubeconfig` to `~/.kube/config` in the sandbox, as the workspace user, and confirms the run namespace is reachable from there. If either fails, it removes the sandbox and creates it once more.
-3. After every sandbox for the case is ready, starts the `benchmark-sub-agent` sessions back to back, so they begin under the same conditions. Each session is named `bench-$RUN_ID-<case>-<model-slug>`, maps every model purpose to the model under test, runs as a task with automatic approval in its run sandbox, and is started with `--parent=$SANDBOX_LLM_SESSION_ID` as a child of the orchestrator session. Crafting sets `SANDBOX_LLM_SESSION_ID` in the workspace agent's shell; when the script is run by hand outside a session, the variable is unset and the sessions start without a parent.
-4. Records each session, its sandbox, and its launch time in `$RUN_DIR/launches.tsv`.
+3. After every sandbox for the case is ready, starts the per-run agent (`$SUB_AGENT`) sessions back to back, so they begin under the same conditions. Each session is named `bench-$RUN_ID-<case>-<model-slug>`, maps every model purpose to the model under test, runs as a task with automatic approval in its run sandbox, and is started with `--parent=$SANDBOX_LLM_SESSION_ID` as a child of the orchestrator session. Crafting sets `SANDBOX_LLM_SESSION_ID` in the workspace agent's shell; when the script is run by hand outside a session, the variable is unset and the sessions start without a parent.
+4. Resolves each child session's ID from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` and records the session name, its ID, its sandbox, and its launch time in `$RUN_DIR/launches.tsv` (columns: `<case>`, `<model-slug>`, `<session name>`, `<session id>`, `<sandbox>`, `<launch time>`).
 
 If the script fails, stop and report its output. Do not start sessions by hand for a case the script did not finish.
 
 Notes on launch behaviour observed in practice:
 
-- The agent must actually resolve, not merely appear in `cs llm agent list`. `cs llm session run --agent NAME` resolves a *personal* agent (one you own) first, then an *org-shared* one; an org-scoped agent with no owner and not shared is listed but cannot be resolved, and the run fails with `AI agent "NAME" not found`. The launch script now checks `cs llm agent show "$SUB_AGENT"` and creates a personal agent from `agents/benchmark-sub-agent.yaml` if it does not resolve. Confirm resolvability the same way before launching by hand: `cs llm agent show benchmark-sub-agent`.
+- The agent must actually resolve, not merely appear in `cs llm agent list`. `cs llm session run --agent NAME` resolves a *personal* agent (one you own) first, then an *org-shared* one; an org-scoped agent with no owner and not shared is listed but cannot be resolved, and the run fails with `AI agent "NAME" not found`. The run uses the per-run agent `$SUB_AGENT` (`benchmark-sub-agent-$RUN_ID`) created in step 1, which is personal and therefore resolves; the launch script reads `SUB_AGENT` from `run.env`. Creating it fresh each run also avoids reusing a stale `benchmark-sub-agent` whose stored definition differs from `agents/benchmark-sub-agent.yaml`. Confirm resolvability before launching by hand with `cs llm agent show "$SUB_AGENT"`.
 - `cs llm session run ... --parent ... --wait=false` can print `Fatal: proto: invalid nil source message` to stderr yet still create the session and exit success. Do not treat that stderr line as failure; confirm the session with `cs llm session list --parent $SANDBOX_LLM_SESSION_ID` (see below).
 - Never start an ad-hoc test session against a run sandbox. A debug session that lands in the same run sandbox as a real agent taints that pair and its result is no longer attributable; the only fix is to tear down that namespace and sandbox and redo the pair clean.
 
@@ -148,7 +170,7 @@ Child sessions are addressed differently from top-level sessions. List them and 
 cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json
 ```
 
-Each child's display name is `sub-agent:bench-$RUN_ID-<case>-<model-slug>`. The `cs llm session wait`, `print`, `cancel`, and `remove` subcommands do not resolve child sessions by that name or by the bare `bench-...` name; use the child's session **ID** from this listing for every later `cs llm session` call. Record the ID alongside each session in `$RUN_DIR/launches.tsv` so steps 5 and 6 can look it up.
+Each child's display name is `sub-agent:bench-$RUN_ID-<case>-<model-slug>`. The `cs llm session wait`, `print`, `cancel`, and `remove` subcommands do not resolve child sessions by that name or by the bare `bench-...` name; use the child's session **ID** for every later `cs llm session` call. The launch script already records each child's ID in `$RUN_DIR/launches.tsv` so steps 5 and 6 can look it up.
 
 ## 5. Enforce the time budget
 
@@ -214,13 +236,19 @@ Remove each run sandbox listed in `runs.tsv`:
 cs sandbox remove "$RUN_SANDBOX" -f --skip-non-exist
 ```
 
-If any pair was redone after being tainted, `runs.tsv` holds only its latest sandbox; remove the superseded sandbox(es) too. Run sandboxes for a run share the `b$RUN_ID-` prefix, so confirm none are left behind:
+If any pair was redone after being tainted, `runs.tsv` holds only its latest sandbox; remove the superseded sandbox(es) too. Run sandboxes for a run share the `bench-$RUN_ID-` prefix, so confirm none are left behind:
 
 ```bash
-cs sandbox list 2>/dev/null | grep "b$RUN_ID-" || true
+cs sandbox list 2>/dev/null | grep "bench-$RUN_ID-" || true
 ```
 
 Namespaces are removed by label regardless of any `...b` redo suffix, since every run namespace is labelled `kube-agent-benchmarks/run=$RUN_ID`.
+
+Remove the per-run agent created in step 1:
+
+```bash
+cs llm agent remove "$SUB_AGENT" 2>/dev/null || cs llm agent remove benchmark-sub-agent-$RUN_ID
+```
 
 For `persistent-storage-failure`, then check for PersistentVolumes left behind by a `Retain` reclaim policy, and delete only those whose claim was in one of this run's namespaces:
 
@@ -236,20 +264,20 @@ Cleanup is scoped to this run only. After step 7 completes, confirm the run leav
 
 ```bash
 kubectl get ns -l kube-agent-benchmarks/run=$RUN_ID -o name
-cs sandbox list | grep "b$RUN_ID-" || true
+cs sandbox list | grep "bench-$RUN_ID-" || true
 ```
 
 Removed by cleanup (only when the user did not ask to keep resources):
 
 - Every run namespace, by the `kube-agent-benchmarks/run=$RUN_ID` label. This includes redo namespaces with a `...b` suffix, because they carry the same label.
-- Every run sandbox for the run: those in `runs.tsv`, plus any superseded sandbox from a redone pair, caught by the `b$RUN_ID-` prefix sweep. Note that `cs sandbox list` prints names with a `work/` folder prefix (`work/b$RUN_ID-...`); match on the `b$RUN_ID-` substring, not a line start.
+- Every run sandbox for the run: those in `runs.tsv`, plus any superseded sandbox from a redone pair, caught by the `bench-$RUN_ID-` prefix sweep. Note that `cs sandbox list` prints names with a `work/` folder prefix (`work/bench-$RUN_ID-...`); match on the `bench-$RUN_ID-` substring, not a line start.
 - For `persistent-storage-failure` only: PersistentVolumes left by a `Retain` reclaim policy whose claim was in one of this run's namespaces.
 
 Kept on purpose:
 
 - The orchestrator sandbox (the one running this runbook). Cleanup never removes it.
 - `$RUN_DIR` (`~/benchmark-runs/$RUN_ID/`): prompts, any saved transcripts, per-run `evaluation.md`, and `report.md`. This is the durable record and must survive cleanup.
-- The shared setup that outlives any single run: the `benchmark-k8s-run` template and the `benchmark-sub-agent` agent. Do not delete these as part of a run.
+- The shared setup that outlives any single run: the `benchmark-k8s-run` template. Do not delete it as part of a run.
 - The sub-agent (child) sessions. See their lifecycle below.
 
 ### Sub-agent session lifecycle
@@ -265,7 +293,7 @@ When the user asks to keep resources, skip the deletions and instead list what w
 
 ```bash
 kubectl get ns -l kube-agent-benchmarks/run=$RUN_ID
-cs sandbox list | grep "b$RUN_ID-" || true
+cs sandbox list | grep "bench-$RUN_ID-" || true
 ```
 
 Kept namespaces and sandboxes continue to consume cluster and sandbox resources until removed by hand with the same commands as step 7.
@@ -274,7 +302,7 @@ Kept namespaces and sandboxes continue to consume cluster and sandbox resources 
 
 Organize results by case, not by model. Save the report to `$RUN_DIR/report.md` and also give it to the user in the conversation.
 
-Start with the run details: run ID, repository revision, kubectl context, Kubernetes server version, orchestrator sandbox and workspace, the resolved model selectors, the judge model (the model running this runbook), the token prices used for cost and their source, and the run sandbox for each case and model. Then, for each case:
+Begin the report by stating it is for run ID `$RUN_ID`, and title the saved report accordingly. Then give the run details: run ID, repository revision, kubectl context, Kubernetes server version, orchestrator sandbox and workspace, the per-run agent name (`$SUB_AGENT`), the resolved model selectors, the judge model (the model running this runbook), the token prices used for cost and their source, and the run sandbox for each case and model. Then, for each case:
 
 ```markdown
 ## <case>

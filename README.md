@@ -29,10 +29,10 @@ kube-agent-benchmarks/
 ├── README.md
 ├── agents/
 │   ├── benchmark-orchestrator-agent.yaml   # Coordinates a run: sets up cases, launches sub-agents, scores them
-│   ├── benchmark-sub-agent.yaml            # The agent under test, started once per model
+│   ├── benchmark-sub-agent.yaml            # Definition for the per-run agent under test (benchmark-sub-agent-<RUN_ID>)
 │   ├── orchestrator-runbook.md             # Step-by-step procedure the orchestrator follows
 │   ├── evaluation-rubric.md                # How the orchestrator judges and measures each run
-│   ├── launch-sub-agents.sh                # Creates run sandboxes and starts sub-agent sessions for a case
+│   ├── launch-sub-agents.sh                # Creates run sandboxes and starts per-run agent sessions for a case
 │   └── prompt.md                           # Kickoff prompt for the orchestrator
 ├── sandbox_templates/
 │   ├── benchmark-k8s.yaml                  # Orchestrator sandbox, with a checkout of this repository
@@ -59,15 +59,18 @@ To run the benchmark with the included orchestrator, you need:
   cs template create benchmark-k8s-run sandbox_templates/benchmark-k8s-run.yaml
   ```
 
-- **Two LLM agents**, created from `agents/` with these exact names:
+- **The orchestrator LLM agent**, created from `agents/` with this exact name:
 
   ```bash
   cs llm agent create benchmark-orchestrator-agent agents/benchmark-orchestrator-agent.yaml
-  cs llm agent create benchmark-sub-agent agents/benchmark-sub-agent.yaml
   ```
 
-  Add `--shared` to make them available to the whole organization.
-- **Models.** Two or more models to compare, configured in the organization. `cs llm config models list` shows the available names.
+  Add `--shared` to make it available to the whole organization. The agent under
+  test is not created here: the orchestrator creates a per-run personal agent
+  `benchmark-sub-agent-<RUN_ID>` from `agents/benchmark-sub-agent.yaml` at the
+  start of each run and removes it during cleanup, so every run uses that exact
+  definition and never a stale or hand-made copy.
+- **Models.** One or more models to compare, configured in the organization. `cs llm config models list` shows the available names. With a single model the run measures that model; with two or more it also compares them.
 - **A Kubernetes cluster.** An existing cluster that the benchmark can use, and a kubectl context for it in `~/.kube/config` of the orchestrator sandbox. The orchestrator copies a kubeconfig with only that context into each run sandbox.
 - **Cluster permissions.** The context must be allowed to create and delete namespaces and the resources each case uses. Every case and model runs in its own namespace, labeled with the run ID, and cleanup removes them by that label.
 - **Case prerequisites.** Each case README has a `## Prerequisites` section with its own requirements, such as node capacity or, for `persistent-storage-failure`, exactly one default StorageClass. The orchestrator checks them before starting and stops if the cluster does not meet them.
@@ -75,7 +78,7 @@ To run the benchmark with the included orchestrator, you need:
 
 ## Run the benchmark
 
-No separate runner is needed: the orchestrator agent is the runner. It follows `agents/orchestrator-runbook.md`, uses `agents/launch-sub-agents.sh` to start one `benchmark-sub-agent` session per model as a child of its own session, evaluates each run against the case's criteria, and reports the results by case.
+No separate runner is needed: the orchestrator agent is the runner. It follows `agents/orchestrator-runbook.md`, creates the per-run agent `benchmark-sub-agent-<RUN_ID>`, uses `agents/launch-sub-agents.sh` to start one session per model as a child of its own session, evaluates each run against the case's criteria, and reports the results by case.
 
 > **Agent note:** the `benchmark-orchestrator-agent` runs by transferring into the orchestrator sandbox's workspace and following the runbook there. Once that transfer returns, you *are* the workspace agent in that sandbox; proceed to follow the runbook in place rather than expecting to hand the work off again.
 
