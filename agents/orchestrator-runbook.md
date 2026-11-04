@@ -12,7 +12,7 @@ The agent under test in each run is `benchmark-sub-agent`, started once per mode
 | --- | --- | --- |
 | Cases | `pending-pod`, `broken-rollout` | Folder names under `benchmark_cases/`. |
 | kubectl context | `bench-cluster` | The target cluster. Must exist in this workspace's kubeconfig. |
-| Models | `claude-sonnet-5-5`, `openai-gpt-5-4-pro`, `claude-opus-4-8` | Two or more. Resolved to exact selectors in step 1. |
+| Models | `claude-sonnet-5-5`, `openai-gpt-5-4-pro`, `claude-opus-4-8` | One or more. With a single model the run measures that model rather than comparing; with two or more it also compares them. Resolved to exact selectors in step 1. |
 | Orchestrator sandbox and workspace | `akansha-benchmark-2/app` | The sandbox running this runbook, created from the `benchmark-k8s` template. The agents under test run in their own sandboxes, created in step 4. |
 | Token prices | `<model>: <input> / <output> USD per million tokens` | Optional. Used for cost; otherwise the provider's published list prices are used. |
 | Keep resources | `no` | `yes` skips cleanup so the namespaces can be inspected. |
@@ -298,10 +298,10 @@ Start with the run details: run ID, repository revision, kubectl context, Kubern
 | Tool calls / kubectl commands | ... | ... | ... |
 | Flags | | read repository files | |
 
-**Best on this case:** <model>, <one-sentence reason>.
+**Best on this case:** <model>, <one-sentence reason>. (Omit this line when only one model ran; there is nothing to compare.)
 
 - **<model A>:** two or three sentences on its diagnosis, the change it made, and any mistakes.
 - ...
 ```
 
-Rank models within a case as the rubric's Ranking section describes. Explain each No and N/A in the notes, with its evidence, and point out runs that were flagged, invalid, or incomplete. End with a short summary across cases only if more than one case ran.
+With a single model, the per-case table has just that one model column, and there is no ranking or "Best on this case" line; report the model's own result, measurements, and any flags. With two or more models, rank them within a case as the rubric's Ranking section describes. Explain each No and N/A in the notes, with its evidence, and point out runs that were flagged, invalid, or incomplete. End with a short summary across cases only if more than one case ran.
