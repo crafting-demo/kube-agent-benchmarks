@@ -136,19 +136,35 @@ For every model of the case, the script:
 
 If the script fails, stop and report its output. Do not start sessions by hand for a case the script did not finish.
 
+Notes on launch behaviour observed in practice:
+
+- The agent must actually resolve, not merely appear in `cs llm agent list`. `cs llm session run --agent NAME` resolves a *personal* agent (one you own) first, then an *org-shared* one; an org-scoped agent with no owner and not shared is listed but cannot be resolved, and the run fails with `AI agent "NAME" not found`. The launch script now checks `cs llm agent show "$SUB_AGENT"` and creates a personal agent from `agents/benchmark-sub-agent.yaml` if it does not resolve. Confirm resolvability the same way before launching by hand: `cs llm agent show benchmark-sub-agent`.
+- `cs llm session run ... --parent ... --wait=false` can print `Fatal: proto: invalid nil source message` to stderr yet still create the session and exit success. Do not treat that stderr line as failure; confirm the session with `cs llm session list --parent $SANDBOX_LLM_SESSION_ID` (see below).
+- Never start an ad-hoc test session against a run sandbox. A debug session that lands in the same run sandbox as a real agent taints that pair and its result is no longer attributable; the only fix is to tear down that namespace and sandbox and redo the pair clean.
+
+Child sessions are addressed differently from top-level sessions. List them and capture their session IDs with:
+
+```bash
+cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json
+```
+
+Each child's display name is `sub-agent:bench-$RUN_ID-<case>-<model-slug>`. The `cs llm session wait`, `print`, `cancel`, and `remove` subcommands do not resolve child sessions by that name or by the bare `bench-...` name; use the child's session **ID** from this listing for every later `cs llm session` call. Record the ID alongside each session in `$RUN_DIR/launches.tsv` so steps 5 and 6 can look it up.
+
 ## 5. Enforce the time budget
 
 Each case's `prompt.md` states its attempt budget (10 minutes for every current case). Wait for each session until its budget, measured from its launch time in `launches.tsv`, runs out:
 
 ```bash
-cs llm session wait bench-$RUN_ID-<case>-<model-slug> --timeout <REMAINING>
-cs llm session list --name bench-$RUN_ID-<case>-<model-slug> -o json
+cs llm session wait <SESSION_ID> --timeout <REMAINING>
+cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json
 ```
 
-When a session is still running at the end of its budget, cancel it and record the attempt as incomplete:
+`<SESSION_ID>` is the child session's ID from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` (step 4). The child name `bench-$RUN_ID-<case>-<model-slug>` is not accepted by these subcommands. A child's state shows in the `--parent` listing's table column; the per-session JSON carries `content.status.state` (e.g. `STOPPED`) and `content.usage` (token counts), but not the message history.
+
+When a session is still running at the end of its budget, cancel it by ID and record the attempt as incomplete:
 
 ```bash
-cs llm session cancel bench-$RUN_ID-<case>-<model-slug>
+cs llm session cancel <SESSION_ID>
 ```
 
 If a session stops waiting for input or approval, do not answer it: answering would help one model and not the others. Record the stop reason and treat the attempt as finished at that point.
@@ -160,11 +176,17 @@ Evaluate each run as soon as its session stops, so the 60-second stability obser
 Save the transcript first, in JSON for counting tool calls and as text for reading:
 
 ```bash
-cs llm session print bench-$RUN_ID-<case>-<model-slug> --print json > "$RUN_DIR/<case>/<model-slug>/transcript.jsonl"
-cs llm session print bench-$RUN_ID-<case>-<model-slug> > "$RUN_DIR/<case>/<model-slug>/transcript.txt"
+cs llm session print <SESSION_ID> --print json > "$RUN_DIR/<case>/<model-slug>/transcript.jsonl"
+cs llm session print <SESSION_ID> > "$RUN_DIR/<case>/<model-slug>/transcript.txt"
 ```
 
 Saving the transcript keeps it with the run: child sessions are removed when the orchestrator session is archived or deleted.
+
+Known limitation: in some CLI builds `cs llm session print` cannot address a sub-agent child session by ID or by name and returns `Session "..." not found`, and the session's `content.conversation` field holds only its initial context, not the message history. When that happens the full transcript (and therefore exact tool-call and kubectl-command counts) is unavailable. In that case:
+
+- Record the token usage from `content.usage` in `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` (fields `prompt_tokens`, `completion_tokens`, and when present `reasoning_tokens`, `cached_tokens`).
+- Judge diagnosis, approach, and reporting from the agent's final reply (its hand-back message) instead of the full transcript, and note in the evaluation that the transcript was unavailable so tool-call/kubectl counts are not reported.
+- Treat the live cluster state as authoritative for Goal achieved, Deployment recovery, Stability, and HTTP behaviour, since those can be verified directly regardless of the transcript.
 
 For the case criteria, use the case README's `## Manual evaluation` section: its criteria table and its operator checks, with the case's default namespace replaced by the run namespace.
 
@@ -174,7 +196,7 @@ For the case criteria, use the case README's `## Manual evaluation` section: its
 
 Check integrity in the transcript. Flag the run if the agent read files from the kube-agent-benchmarks repository, used any sandbox other than its own run sandbox, or read or changed another run's namespace. Any of these also makes the rubric's Stayed in scope criterion No.
 
-Find the session ID with `cs llm session list --name bench-$RUN_ID-<case>-<model-slug> -o json`, then collect the measurements as the rubric describes. If any model other than the one under test appears in the token usage, mark the run invalid.
+Use the session ID recorded in `$RUN_DIR/launches.tsv` (from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json`), then collect the measurements as the rubric describes. If any model other than the one under test appears in the token usage, mark the run invalid.
 
 Write each run's answers, evidence, and measurements to `$RUN_DIR/<case>/<model-slug>/evaluation.md` before moving on.
 
@@ -192,6 +214,14 @@ Remove each run sandbox listed in `runs.tsv`:
 cs sandbox remove "$RUN_SANDBOX" -f --skip-non-exist
 ```
 
+If any pair was redone after being tainted, `runs.tsv` holds only its latest sandbox; remove the superseded sandbox(es) too. Run sandboxes for a run share the `b$RUN_ID-` prefix, so confirm none are left behind:
+
+```bash
+cs sandbox list 2>/dev/null | grep "b$RUN_ID-" || true
+```
+
+Namespaces are removed by label regardless of any `...b` redo suffix, since every run namespace is labelled `kube-agent-benchmarks/run=$RUN_ID`.
+
 For `persistent-storage-failure`, then check for PersistentVolumes left behind by a `Retain` reclaim policy, and delete only those whose claim was in one of this run's namespaces:
 
 ```bash
@@ -199,6 +229,46 @@ kubectl get pv -o jsonpath='{range .items[?(@.spec.claimRef.name=="store-demo-da
 ```
 
 Leave the agent sessions and the orchestrator sandbox in place; `$RUN_DIR`, with the saved transcripts, is the record of the run.
+
+### What is removed and what is kept
+
+Cleanup is scoped to this run only. After step 7 completes, confirm the run leaves nothing behind on the cluster or in sandboxes:
+
+```bash
+kubectl get ns -l kube-agent-benchmarks/run=$RUN_ID -o name
+cs sandbox list | grep "b$RUN_ID-" || true
+```
+
+Removed by cleanup (only when the user did not ask to keep resources):
+
+- Every run namespace, by the `kube-agent-benchmarks/run=$RUN_ID` label. This includes redo namespaces with a `...b` suffix, because they carry the same label.
+- Every run sandbox for the run: those in `runs.tsv`, plus any superseded sandbox from a redone pair, caught by the `b$RUN_ID-` prefix sweep. Note that `cs sandbox list` prints names with a `work/` folder prefix (`work/b$RUN_ID-...`); match on the `b$RUN_ID-` substring, not a line start.
+- For `persistent-storage-failure` only: PersistentVolumes left by a `Retain` reclaim policy whose claim was in one of this run's namespaces.
+
+Kept on purpose:
+
+- The orchestrator sandbox (the one running this runbook). Cleanup never removes it.
+- `$RUN_DIR` (`~/benchmark-runs/$RUN_ID/`): prompts, any saved transcripts, per-run `evaluation.md`, and `report.md`. This is the durable record and must survive cleanup.
+- The shared setup that outlives any single run: the `benchmark-k8s-run` template and the `benchmark-sub-agent` agent. Do not delete these as part of a run.
+- The sub-agent (child) sessions. See their lifecycle below.
+
+### Sub-agent session lifecycle
+
+The sub-agent sessions are children of the orchestrator session and are not individually deletable: `cs llm session remove` does not resolve a child by its `sub-agent:bench-...` name or by its ID. Their lifecycle is tied to the orchestrator session — they are removed when the orchestrator session is archived or deleted. Two consequences:
+
+- Do not rely on deleting child sessions during cleanup; leave them with the orchestrator session.
+- Because the sessions (and any transcript still only inside them) disappear with the orchestrator session, step 6 must have already written tokens, evidence, and `report.md` into `$RUN_DIR`. Do not archive or delete the orchestrator session until the run's record in `$RUN_DIR` is complete.
+
+### Keeping resources for inspection
+
+When the user asks to keep resources, skip the deletions and instead list what was left in place so it can be found and removed later:
+
+```bash
+kubectl get ns -l kube-agent-benchmarks/run=$RUN_ID
+cs sandbox list | grep "b$RUN_ID-" || true
+```
+
+Kept namespaces and sandboxes continue to consume cluster and sandbox resources until removed by hand with the same commands as step 7.
 
 ## 8. Report
 

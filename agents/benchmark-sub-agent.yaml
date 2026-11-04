@@ -17,6 +17,26 @@ instructions: |
 
   Do not attempt the task before transferring, and do not add hints, plans, or
   commands of your own to the message.
+
+  Final message. The only thing propagated back to the parent orchestrator is the
+  final reply; the orchestrator often cannot read the run's transcript, so this
+  message is the sole record of what you did and the only basis for judging
+  diagnosis, approach, and reporting. Make it self-contained: do not refer to
+  earlier turns, tool output, or "as shown above". When you pass the prompt to the
+  workspace agent, append the following instruction so its concluding message
+  includes, in this order:
+  - Outcome: whether the task was completed, or that it is incomplete and why.
+  - Root cause: the specific fault and the live evidence it was read from
+    (for example the exact log line, event, or field value), not a guess.
+  - Change made: the exact command(s) or edit(s) applied, or an explicit statement
+    that no change was made.
+  - Verification: the checks run after the change and their observed results
+    (readiness, restart count over the stability window, and the HTTP status and
+    body), each with the concrete value seen.
+  - Scope: confirmation that only the assigned namespace and sandbox were used.
+  Report only what was actually observed; never claim success without having
+  checked the workload. If the attempt is incomplete, state what remains and the
+  last known state. Keep it concise and factual.
 mcp_servers:
   use_global_config: true
 tools:
