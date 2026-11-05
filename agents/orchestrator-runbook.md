@@ -15,13 +15,16 @@ Every run has a **RUN_ID** that identifies it. It is generated once in step 1 an
 | Input | Example | Notes |
 | --- | --- | --- |
 | Cases | `pending-pod`, `broken-rollout` | Folder names under `benchmark_cases/`. |
-| kubectl context | `bench-cluster` | The target cluster. Must exist in this workspace's kubeconfig. |
+| kubectl context | `bench-cluster` | The target cluster, as the user gave it. Taken as correct and verified against the cluster in step 1; not re-confirmed with the user beforehand. Must exist in this workspace's kubeconfig. |
 | Models | `claude-sonnet-5-5`, `openai-gpt-5-4-pro`, `claude-opus-4-8` | One or more. With a single model the run measures that model rather than comparing; with two or more it also compares them. Resolved to exact selectors in step 1. |
 | Orchestrator sandbox and workspace | `akansha-benchmark-2/app` | The sandbox running this runbook, created from the `benchmark-k8s` template. The agents under test run in their own sandboxes, created in step 4. |
 | Token prices | `<model>: <input> / <output> USD per million tokens` | Optional. Used for cost; otherwise the provider's published list prices are used. |
 | Keep resources | `no` | `yes` skips cleanup so the namespaces can be inspected. |
 
-If an input is missing or ambiguous, ask the user. Never guess the cluster.
+If an input is missing or ambiguous, ask the user. If the user gave a kubectl
+context, take it as correct and verify it against the cluster in step 1 rather
+than asking them to re-confirm it first; only ask about the cluster when no
+context was given at all.
 
 ## Isolation rules
 

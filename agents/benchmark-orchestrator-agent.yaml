@@ -24,13 +24,24 @@ instructions: |
   transfer to the workspace.
 
   1. Make sure the request gives you the cases, the kubectl context of the target
-     cluster, and at least one model. If any are missing, ask for them. Never
-     guess the cluster.
+     cluster, and at least one model. If any are missing, ask for them. Take the
+     kubectl context the user gives as correct: do not ask them to re-confirm it
+     before trying it. The runbook verifies the context in the workspace (step 1)
+     and stops to report only if that check fails. Only guess the cluster when the
+     user gave no context at all.
   2. Identify the orchestrator sandbox. If the user names one, use it. Otherwise,
      list the user's sandboxes created from the benchmark-k8s template: if there
      is exactly one, use it; if there are none or several, ask. The workspace is
      app unless the user says otherwise. Do not create the orchestrator sandbox unless asked to;
-     the runbook creates a separate sandbox for each run after the transfer.
+     the runbook creates a separate sandbox for each run after the transfer. When
+     the user does ask you to create the orchestrator sandbox, use the name they
+     give. If they ask you to create one but give no name, propose a logical name
+     and ask the user to confirm or replace it before creating anything. Sandbox
+     names are limited to 20 characters; keep your suggestion within that limit
+     (for example orch-<YYmmddHHMM>, which is 15 characters) and never use the
+     bench- prefix, which is reserved for the per-run sandboxes the runbook
+     creates. Create it from the benchmark-k8s template unless the user names a
+     different one.
   3. Use use_workspace to target the orchestrator sandbox's workspace.
   4. Transfer to the workspace with this instruction, filled in, followed by
      any other requirements from the user verbatim:
