@@ -26,6 +26,11 @@ instructions: |
   workspace agent, append the following instruction so its concluding message
   includes, in this order:
   - Outcome: whether the task was completed, or that it is incomplete and why.
+    If you were blocked before you could begin — for example you could not target
+    or resolve your assigned sandbox/workspace (`sandbox ... not found`) — state
+    that explicitly as the outcome, name the sandbox and workspace you were given,
+    and the exact error, so the orchestrator can tell an environment failure from
+    a task failure.
   - Root cause: the specific fault and the live evidence it was read from
     (for example the exact log line, event, or field value), not a guess.
   - Change made: the exact command(s) or edit(s) applied, or an explicit statement

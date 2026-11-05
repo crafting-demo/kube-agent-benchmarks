@@ -28,6 +28,12 @@ CASE=${2:?$usage}
 SANDBOX_TEMPLATE=benchmark-k8s-run
 WORKSPACE=app
 WORKSPACE_UID=1000
+# Sandboxes are created in the current folder and resolve by their
+# folder-qualified name. `cs sandbox list` prints that qualified form (e.g.
+# work/bench-$RUN_ID-1). The workspace target passed to the agent and to
+# `cs exec`/`cs llm session run -W` must use a name that resolves; the bare
+# `bench-...` name may not, so the run prompt names the sandbox with its folder
+# prefix (see step 3 of the runbook).
 
 # shellcheck source=/dev/null
 . "$RUN_DIR/run.env"
@@ -116,11 +122,14 @@ while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
     --wait=false </dev/null
   # The child session is addressed later by ID, not by name, so resolve and
   # record it. It is a child of $SANDBOX_LLM_SESSION_ID with display name
-  # "sub-agent:$session".
+  # "sub-agent:$session". `cs llm session run` can print
+  # "Fatal: proto: invalid nil source message" to stderr yet still create the
+  # session; guard the id resolution so a benign failure here does not abort the
+  # script (set -e) before launches.tsv is written.
   session_id=$(cs llm session list --parent "${SANDBOX_LLM_SESSION_ID:-}" -o json 2>/dev/null |
     awk -v n="sub-agent:$session" '
       /"id"/ { gsub(/[",]/,""); id=$2 }
-      index($0, n) { print id; exit }')
+      index($0, n) { print id; exit }') || true
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$CASE" "$slug" "$session" "${session_id:-}" "$sandbox" "$launched" >>"$RUN_DIR/launches.tsv"
   echo "Started $session (${session_id:-unknown id}) on $model in $sandbox"
 done 3<<<"$pairs"

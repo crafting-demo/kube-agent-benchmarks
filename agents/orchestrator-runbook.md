@@ -32,7 +32,7 @@ These apply to every step, for the orchestrator and for every agent under test.
 
 - Create only namespaces named for this run, and label each one `kube-agent-benchmarks/run=<RUN_ID>`. Before creating a namespace, confirm it does not exist.
 - Do not create, modify, or delete anything outside this run's namespaces. The only exception is cleanup of PersistentVolumes provisioned for this run's claims, as described in step 7.
-- Create only sandboxes named for this run, from the `benchmark-k8s-run` template, and remove only those. Before creating a sandbox, confirm it does not exist.
+- Create only sandboxes named for this run, from the `benchmark-k8s-run` template, and remove only those. Before suggesting or creating a sandbox name, and again right before creating it, confirm it does not already exist by listing sandboxes (`cs sandbox list`); never rely on the create call's return value alone. `cs sandbox list` prints names with a `work/` folder prefix (e.g. `work/bench-$RUN_ID-1`); match on the `bench-$RUN_ID-` substring. After creating a sandbox, confirm it is present in `cs sandbox list` before treating creation as successful, since the create call can report an error yet still create the sandbox.
 - Pass the cluster explicitly on every command (`KUBECONFIG` set to the run's kubeconfig, or `--context`). Do not change the current context in the user's kubeconfig.
 
 ## 1. Prepare the run
@@ -50,6 +50,12 @@ Confirm the run sandbox template exists; stop and report if it does not:
 
 ```bash
 cs template show benchmark-k8s-run
+```
+
+List existing sandboxes so the run-sandbox names chosen in step 3 do not collide with any already present (the create call can report a misleading error yet still create a sandbox, so always verify against this list rather than trusting the call):
+
+```bash
+cs sandbox list
 ```
 
 Resolve each requested model to an exact selector from the org's model list:
@@ -129,13 +135,15 @@ Each (case, model) pair gets a run sandbox. Sandbox names are limited to 20 char
 RUN_SANDBOX=bench-$RUN_ID-<N>
 ```
 
+Before finalizing each name, confirm it does not already exist (`cs sandbox list | grep "bench-$RUN_ID-"`); match on the `bench-$RUN_ID-` substring, not a line start, because listed names carry a `work/` folder prefix.
+
 Record each pair's namespace and sandbox in `$RUN_DIR/runs.tsv`, one line per pair: `<case>`, `<model-slug>`, `<NAMESPACE>`, `<RUN_SANDBOX>`, separated by tabs. Later steps look up sandboxes there.
 
 For each namespace, take the case's `prompt.md` and replace the case's default namespace with the run namespace. The default namespace is the `metadata.name` in the case's `manifests/namespace.yaml`. Then put this header before the task, filled in:
 
 ```text
 Environment for this task:
-- Run every command in sandbox <RUN_SANDBOX>, workspace app.
+- Run every command in sandbox work/<RUN_SANDBOX>, workspace app. Target it with its folder-qualified name (the `work/` prefix) so the workspace resolves; the bare `<RUN_SANDBOX>` may not resolve.
 - Target cluster: pass `--context <CONTEXT>` to every kubectl command. Do not change the kubeconfig's current context.
 - Your namespace is <NAMESPACE>. Other namespaces on this cluster belong to other work; do not read or change them.
 - Do not use any other sandbox or workspace.
@@ -160,6 +168,14 @@ For every model of the case, the script:
 4. Resolves each child session's ID from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` and records the session name, its ID, its sandbox, and its launch time in `$RUN_DIR/launches.tsv` (columns: `<case>`, `<model-slug>`, `<session name>`, `<session id>`, `<sandbox>`, `<launch time>`).
 
 If the script fails, stop and report its output. Do not start sessions by hand for a case the script did not finish.
+
+After launch, confirm each run sandbox is actually reachable by the agent before trusting any result. The launch script's own reachability check runs at creation time; a sandbox can still be unreachable from the agent's workspace targeting moments later (for example a transient targeting or folder-prefix issue), in which case the agent stops almost immediately having done nothing. If an agent reports `sandbox <name> not found` (or any sandbox-targeting blocker), list sandboxes to check whether it exists under a different qualifier before concluding it is gone:
+
+```bash
+cs sandbox list | grep "bench-$RUN_ID-" || true
+```
+
+The listed name carries a `work/` folder prefix; the agent must target the folder-qualified name. A run that stops at startup because its sandbox was not reachable is an **environment/infrastructure failure, not a model result** — see step 6 for how to score it, and do not clean the run sandbox up until this has been diagnosed.
 
 Notes on launch behaviour observed in practice:
 
@@ -223,9 +239,13 @@ Check integrity in the transcript. Flag the run if the agent read files from the
 
 Use the session ID recorded in `$RUN_DIR/launches.tsv` (from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json`), then collect the measurements as the rubric describes. If any model other than the one under test appears in the token usage, mark the run invalid.
 
+Distinguish infrastructure failures from model results. If the agent could not start the task through no fault of its own — for example it reported that its run sandbox was not reachable (`sandbox <name> not found`), stopped within seconds having made no change, and the live cluster is unchanged — mark the run **invalid (infrastructure failure)**: score the outcome and case criteria as **N/A (not attributable to the model)** rather than No, note the blocker and its evidence (the agent's hand-back message and the unchanged cluster state), and recommend a re-run. Only the integrity/scope criteria still apply, since doing nothing stays in scope. Do not record such a run as a model failure. Confirm the sandbox's existence with `cs sandbox list` (matching the `bench-$RUN_ID-` substring) before concluding it was missing.
+
 Write each run's answers, evidence, and measurements to `$RUN_DIR/<case>/<model-slug>/evaluation.md` before moving on.
 
 ## 7. Clean up
+
+Run cleanup only after the run is fully concluded: every session has stopped, every run has been evaluated, and the report (step 8) has been published to the user. Cleanup must not run while any sub-agent outcome is still in flight, because removing a run sandbox or namespace destroys the evidence needed to diagnose an incomplete or anomalous run (for example a sandbox-reachability failure whose hand-back message arrives after the orchestrator thinks it is done). If a run is incomplete, anomalous, or flagged invalid, keep its namespace and sandbox for inspection and report them in place instead of deleting them.
 
 Skip this step if the user asked to keep resources; list the namespaces and run sandboxes left in place instead.
 
@@ -303,7 +323,7 @@ Kept namespaces and sandboxes continue to consume cluster and sandbox resources 
 
 ## 8. Report
 
-Organize results by case, not by model. Save the report to `$RUN_DIR/report.md` and also give it to the user in the conversation.
+Organize results by case, not by model. Save the report to `$RUN_DIR/report.md` and also give it to the user in the conversation. Publish this report before running cleanup (step 7): cleanup comes last, after the report is delivered and all runs have concluded.
 
 Begin the report by stating it is for run ID `$RUN_ID`, and title the saved report accordingly. Then give the run details: run ID, repository revision, kubectl context, Kubernetes server version, orchestrator sandbox and workspace, the per-run agent name (`$SUB_AGENT`), the resolved model selectors, the judge model (the model running this runbook), the token prices used for cost and their source, and the run sandbox for each case and model. Then, for each case:
 
