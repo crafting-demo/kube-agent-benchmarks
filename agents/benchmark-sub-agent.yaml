@@ -39,6 +39,7 @@ instructions: |
     (readiness, restart count over the stability window, and the HTTP status and
     body), each with the concrete value seen.
   - Scope: confirmation that only the assigned namespace and sandbox were used.
+  - Tool calls made | kubectl commands | Every `kubectl` invocation inside the `shell` tool calls. A shell call that runs several `kubectl` commands counts each one.
   Report only what was actually observed; never claim success without having
   checked the workload. If the attempt is incomplete, state what remains and the
   last known state. Keep it concise and factual.

@@ -1,20 +1,17 @@
 brief: Runs Kubernetes benchmark cases against several LLMs and reports results by case
 details: |
-  Sets up one or more kube-agent-benchmarks cases on an existing cluster, runs a
-  per-run copy of the benchmark-sub-agent on each case once per requested model,
+  Sets up one or more kube-agent-benchmarks cases on a user-provided cluster, runs a
+  an agent on each benchmarking case once per requested model (using subagent defintion benchmark-sub-agent)
   each in its own namespace and its own sandbox, evaluates every run against the
   case's criteria, and reports scores organized by case.
 
-  Start it with the prompt in the repository's agents/prompt.md, edited for the
-  run. The prompt gives:
-  - the benchmark cases, by name (folder names under benchmark_cases/, such as
+  To start benchmarking, provide a prompt similar to the example at ./agents/prompt.md. The prompt should provide:
+  - the benchmark case(s), by name (folder names under benchmark_cases/, such as
     pending-pod or broken-rollout);
   - the target cluster, as a kubectl context name;
-  - the models to compare, one or more (for example claude-sonnet-5-5,
-    openai-gpt-5-4-pro, claude-opus-4-8); with one model the run measures that
-    model, with two or more it also compares them;
-  - optionally, the orchestrator sandbox to run in, token prices for the cost
-    estimate, and whether to keep the scenario resources after the run.
+  - the models to evaluate and compare, one or more (for example claude-sonnet-5-5,
+    openai-gpt-5-4-pro, claude-opus-4-8);
+  - the orchestrator sandbox to run in, or the sandbox template and name to create an orchestrator sandbox from
 
   The sub-agent sessions start as children of this session.
 instructions: |
@@ -23,25 +20,21 @@ instructions: |
   agents/orchestrator-runbook.md, which you follow as the workspace agent after you
   transfer to the workspace.
 
-  1. Make sure the request gives you the cases, the kubectl context of the target
-     cluster, and at least one model. If any are missing, ask for them. Take the
-     kubectl context the user gives as correct: do not ask them to re-confirm it
-     before trying it. The runbook verifies the context in the workspace (step 1)
-     and stops to report only if that check fails. Only guess the cluster when the
-     user gave no context at all.
-  2. Identify the orchestrator sandbox. If the user names one, use it. Otherwise,
-     list the user's sandboxes created from the benchmark-k8s template: if there
-     is exactly one, use it; if there are none or several, ask. The workspace is
-     app unless the user says otherwise. Do not create the orchestrator sandbox unless asked to;
-     the runbook creates a separate sandbox for each run after the transfer. When
-     the user does ask you to create the orchestrator sandbox, use the name they
-     give. If they ask you to create one but give no name, propose a logical name
-     and ask the user to confirm or replace it before creating anything. Sandbox
-     names are limited to 20 characters; keep your suggestion within that limit
+  1. Make sure the provided prompt gives you the cases to run, the kubectl context of the target
+     cluster, at least one model, and the sandbox to orchestrate from 
+     (or else the sandbox template to create the orchestrator sandbox from).
+     If any are missing, ask for them. If provided model aliases, resolve them. Verify the
+     kubectl context the user gives is correct/accessible. The runbook verifies the context in the workspace (step 1)
+  2. Identify the orchestrator sandbox. If the user names one, list sandboxes, verify it exists and use it.
+     The mentioned sandbox may be nested in a folder. The workspace is
+     app unless the user says otherwise. If user provides a sandbox template instead of a sandbox,
+     create the orchestrator sandbox from the provided template (verify the template exists; it may be inside a folder.
+     If the user provides a sandbox name, use it, or else propose a logical name within the limit of 20 characters
      (for example orch-<YYmmddHHMM>, which is 15 characters) and never use the
      bench- prefix, which is reserved for the per-run sandboxes the runbook
-     creates. Create it from the benchmark-k8s template unless the user names a
-     different one.
+     creates. Create the sandbox from the benchmark-k8s template unless the user names a
+     different one. Before using, suggesting or creating a sandbox name, confirm it does not already 
+     exist by listing sandboxes (`cs sandbox list`). Note sandboxes and templates may exist inside a folder
   3. Use use_workspace to target the orchestrator sandbox's workspace.
   4. Transfer to the workspace with this instruction, filled in, followed by
      any other requirements from the user verbatim:
@@ -52,7 +45,6 @@ instructions: |
      kubectl context: <context>
      Models: <models, as the user wrote them>
      Orchestrator sandbox and workspace: <sandbox>/<workspace>
-     Keep resources after the run: <yes or no; default no>
 
 mcp_servers:
   use_global_config: true

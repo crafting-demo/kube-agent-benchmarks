@@ -15,16 +15,11 @@ Every run has a **RUN_ID** that identifies it. It is generated once in step 1 an
 | Input | Example | Notes |
 | --- | --- | --- |
 | Cases | `pending-pod`, `broken-rollout` | Folder names under `benchmark_cases/`. |
-| kubectl context | `bench-cluster` | The target cluster, as the user gave it. Taken as correct and verified against the cluster in step 1; not re-confirmed with the user beforehand. Must exist in this workspace's kubeconfig. |
+| kubectl context | `bench-cluster` | The target cluster, as the user gave it. Must exist in this workspace's kubeconfig. |
 | Models | `claude-sonnet-5-5`, `openai-gpt-5-4-pro`, `claude-opus-4-8` | One or more. With a single model the run measures that model rather than comparing; with two or more it also compares them. Resolved to exact selectors in step 1. |
-| Orchestrator sandbox and workspace | `akansha-benchmark-2/app` | The sandbox running this runbook, created from the `benchmark-k8s` template. The agents under test run in their own sandboxes, created in step 4. |
-| Token prices | `<model>: <input> / <output> USD per million tokens` | Optional. Used for cost; otherwise the provider's published list prices are used. |
-| Keep resources | `no` | `yes` skips cleanup so the namespaces can be inspected. |
+| Orchestrator sandbox and workspace | `work/akansha-benchmark-2/app` | The sandbox running this runbook, created from the `benchmark-k8s` template. The agents under test run in their own sandboxes, created in step 4. |
 
-If an input is missing or ambiguous, ask the user. If the user gave a kubectl
-context, take it as correct and verify it against the cluster in step 1 rather
-than asking them to re-confirm it first; only ask about the cluster when no
-context was given at all.
+If an input is missing, ask the user. If the user gave a kubectl context, verify it against the cluster in step 1 to confirm.
 
 ## Isolation rules
 
@@ -32,7 +27,7 @@ These apply to every step, for the orchestrator and for every agent under test.
 
 - Create only namespaces named for this run, and label each one `kube-agent-benchmarks/run=<RUN_ID>`. Before creating a namespace, confirm it does not exist.
 - Do not create, modify, or delete anything outside this run's namespaces. The only exception is cleanup of PersistentVolumes provisioned for this run's claims, as described in step 7.
-- Create only sandboxes named for this run, from the `benchmark-k8s-run` template, and remove only those. Before suggesting or creating a sandbox name, and again right before creating it, confirm it does not already exist by listing sandboxes (`cs sandbox list`); never rely on the create call's return value alone. `cs sandbox list` prints names with a `work/` folder prefix (e.g. `work/bench-$RUN_ID-1`); match on the `bench-$RUN_ID-` substring. After creating a sandbox, confirm it is present in `cs sandbox list` before treating creation as successful, since the create call can report an error yet still create the sandbox.
+- Create only sandboxes named for this run, from the `benchmark-k8s-run` template. Before suggesting or creating a sandbox name, and again right before creating it, confirm it does not already exist by listing sandboxes (`cs sandbox list`); never rely on the create call's return value alone. `cs sandbox list` prints names with a folder prefix (e.g. `work/bench-$RUN_ID-1`); match on the `bench-$RUN_ID-` substring. After creating a sandbox, confirm it is present in `cs sandbox list` before treating creation as successful.
 - Pass the cluster explicitly on every command (`KUBECONFIG` set to the run's kubeconfig, or `--context`). Do not change the current context in the user's kubeconfig.
 
 ## 1. Prepare the run
@@ -46,13 +41,13 @@ git rev-parse --short HEAD
 
 Confirm every requested case exists as `benchmark_cases/<case>/` with a `prompt.md` and `README.md`.
 
-Confirm the run sandbox template exists; stop and report if it does not:
+Confirm the run sandbox template exists at `../sandbox_templates/benchmark-k8s-run.yaml` and use it. The template may already be created, which you can verify:
 
 ```bash
 cs template show benchmark-k8s-run
 ```
 
-List existing sandboxes so the run-sandbox names chosen in step 3 do not collide with any already present (the create call can report a misleading error yet still create a sandbox, so always verify against this list rather than trusting the call):
+List existing sandboxes so the run-sandbox names chosen in step 3 do not collide with any already present, and adjust the RUN_ID if needed to avoid collision:
 
 ```bash
 cs sandbox list
@@ -66,9 +61,10 @@ cs llm config models list
 
 Match the user's names to the `NAME` column. For example, `claude-sonnet-5-5` is `anthropic:claude-sonnet-5-5` and `openai-gpt-5-4-pro` is `openai:gpt-5.4-pro`. If a name matches no model, or more than one, ask the user. For each model, derive a slug from the part after the colon, with dots replaced by dashes (`gpt-5-4-pro`). After creating the run directory below, write one line per model to `$RUN_DIR/models.tsv`: the slug and the exact selector, separated by a tab.
 
-Generate the run ID and use it for everything this run creates:
+Generate the run ID and use it for everything this run creates. Avoid conflicting RUN_IDs by listing sandboxes beforehand to identify RUN_IDs already in use as part of an existing sandbox's name:
 
 ```bash
+cs sandbox list
 RUN_ID=$(date +%y%m%d%H%M)
 ```
 
@@ -106,7 +102,7 @@ SUB_AGENT=$SUB_AGENT
 EOF
 ```
 
-Stop and report if the context does not exist, the cluster is unreachable, or namespace creation is not allowed. Record the server version for the report.
+Report if the context does not exist, the cluster is unreachable, or namespace creation is not allowed. Record the server version for the report.
 
 Check each case's README `## Prerequisites` section against the cluster. For example, `persistent-storage-failure` needs exactly one default StorageClass and none named `fast-ssd`. Stop and report any prerequisite the cluster does not meet.
 
@@ -179,8 +175,7 @@ The listed name carries a `work/` folder prefix; the agent must target the folde
 
 Notes on launch behaviour observed in practice:
 
-- The agent must actually resolve, not merely appear in `cs llm agent list`. `cs llm session run --agent NAME` resolves a *personal* agent (one you own) first, then an *org-shared* one; an org-scoped agent with no owner and not shared is listed but cannot be resolved, and the run fails with `AI agent "NAME" not found`. The run uses the per-run agent `$SUB_AGENT` (`benchmark-sub-agent-$RUN_ID`) created in step 1, which is personal and therefore resolves; the launch script reads `SUB_AGENT` from `run.env`. Creating it fresh each run also avoids reusing a stale `benchmark-sub-agent` whose stored definition differs from `agents/benchmark-sub-agent.yaml`. Confirm resolvability before launching by hand with `cs llm agent show "$SUB_AGENT"`.
-- `cs llm session run ... --parent ... --wait=false` can print `Fatal: proto: invalid nil source message` to stderr yet still create the session and exit success. Do not treat that stderr line as failure; confirm the session with `cs llm session list --parent $SANDBOX_LLM_SESSION_ID` (see below).
+- The agent must actually resolve, not merely appear in `cs llm agent list`. `cs llm session run --agent NAME` resolves a *personal* agent (one you own) first, then an *org-shared* one; an org-scoped agent with no owner and not shared is listed but cannot be resolved, and the run fails with `AI agent "NAME" not found`. The run uses the per-run agent `$SUB_AGENT` (`benchmark-sub-agent-$RUN_ID`) created in step 1, which is personal and therefore resolves; the launch script reads `SUB_AGENT` from `run.env`. Creating it fresh each run also avoids reusing a stale `benchmark-sub-agent` whose stored definition should match `agents/benchmark-sub-agent.yaml`. Confirm resolvability before launching by hand with `cs llm agent show "$SUB_AGENT"`.
 - Never start an ad-hoc test session against a run sandbox. A debug session that lands in the same run sandbox as a real agent taints that pair and its result is no longer attributable; the only fix is to tear down that namespace and sandbox and redo the pair clean.
 
 Child sessions are addressed differently from top-level sessions. List them and capture their session IDs with:
@@ -247,7 +242,6 @@ Write each run's answers, evidence, and measurements to `$RUN_DIR/<case>/<model-
 
 Run cleanup only after the run is fully concluded: every session has stopped, every run has been evaluated, and the report (step 8) has been published to the user. Cleanup must not run while any sub-agent outcome is still in flight, because removing a run sandbox or namespace destroys the evidence needed to diagnose an incomplete or anomalous run (for example a sandbox-reachability failure whose hand-back message arrives after the orchestrator thinks it is done). If a run is incomplete, anomalous, or flagged invalid, keep its namespace and sandbox for inspection and report them in place instead of deleting them.
 
-Skip this step if the user asked to keep resources; list the namespaces and run sandboxes left in place instead.
 
 ```bash
 kubectl delete namespace -l kube-agent-benchmarks/run=$RUN_ID
@@ -310,16 +304,6 @@ The sub-agent sessions are children of the orchestrator session and are not indi
 - Do not rely on deleting child sessions during cleanup; leave them with the orchestrator session.
 - Because the sessions (and any transcript still only inside them) disappear with the orchestrator session, step 6 must have already written tokens, evidence, and `report.md` into `$RUN_DIR`. Do not archive or delete the orchestrator session until the run's record in `$RUN_DIR` is complete.
 
-### Keeping resources for inspection
-
-When the user asks to keep resources, skip the deletions and instead list what was left in place so it can be found and removed later:
-
-```bash
-kubectl get ns -l kube-agent-benchmarks/run=$RUN_ID
-cs sandbox list | grep "bench-$RUN_ID-" || true
-```
-
-Kept namespaces and sandboxes continue to consume cluster and sandbox resources until removed by hand with the same commands as step 7.
 
 ## 8. Report
 
