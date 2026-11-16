@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pending-pod-benchmark
+  labels:
+    app.kubernetes.io/part-of: kube-agent-benchmarks

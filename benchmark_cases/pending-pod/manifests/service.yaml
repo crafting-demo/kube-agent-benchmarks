@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pending-demo
+  labels:
+    app.kubernetes.io/part-of: kube-agent-benchmarks
+spec:
+  type: ClusterIP
+  selector:
+    app: pending-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
