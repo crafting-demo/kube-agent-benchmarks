@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-worker
+  labels:
+    app.kubernetes.io/part-of: kube-agent-benchmarks
+    app.kubernetes.io/component: batch
+  annotations:
+    kube-agent-benchmarks/tier: best-effort
+    kube-agent-benchmarks/description: "Background report generation. Can be reduced or paused during incidents; unfinished reports are regenerated on the next run."
+spec:
+  replicas: 4
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: report-worker
+  template:
+    metadata:
+      labels:
+        app: report-worker
+        app.kubernetes.io/component: batch
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "-c"]
+          args:
+            - |
+              import hashlib
+              import time
+
+              CHUNK_MIB = 4
+              cache = []
+              batch = 0
+
+              print("Report worker started", flush=True)
+              while True:
+                  batch += 1
+                  digest = hashlib.sha256()
+                  deadline = time.monotonic() + 0.1
+                  while time.monotonic() < deadline:
+                      digest.update(b"report-row" * 1024)
+                  # Rendered reports are cached and never released.
+                  cache.append(b"r" * (CHUNK_MIB * 1024 * 1024))
+                  print(f"Processed batch {batch}; report cache holds {len(cache) * CHUNK_MIB} MiB", flush=True)
+                  time.sleep(1)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 224Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
