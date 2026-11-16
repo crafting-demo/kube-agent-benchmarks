@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Creates the run sandboxes for one benchmark case and starts the per-run agent
+# in each, one session per model. Step 4 of orchestrator-runbook.md runs it once
+# per case, from the orchestrator sandbox.
+#
+# Usage: launch-sub-agents.sh RUN_DIR CASE
+#
+# Reads from RUN_DIR:
+#   run.env                    RUN_ID, CONTEXT, and SUB_AGENT
+#   kubeconfig                 kubeconfig containing only CONTEXT
+#   models.tsv                 <model-slug> TAB <model selector>
+#   runs.tsv                   <case> TAB <model-slug> TAB <namespace> TAB <sandbox>
+#   <case>/<model-slug>/prompt.md
+#
+# Appends one line per started session to RUN_DIR/launches.tsv:
+#   <case> TAB <model-slug> TAB <session name> TAB <session id> TAB <sandbox> TAB <launch time, epoch seconds>
+#
+# Every session is started as a task with --parent set to the session running
+# this script ($SANDBOX_LLM_SESSION_ID, set by Crafting in the workspace agent's
+# shell), so it is listed under the orchestrator session and shares its
+# lifecycle. Run by hand outside a session, the sessions start without a parent.
+set -euo pipefail
+
+usage="usage: launch-sub-agents.sh RUN_DIR CASE"
+RUN_DIR=${1:?$usage}
+CASE=${2:?$usage}
+
+SANDBOX_TEMPLATE=benchmark-k8s-run
+WORKSPACE=app
+WORKSPACE_UID=1000
+# Sandboxes are created in the current folder and resolve by their
+# folder-qualified name. `cs sandbox list` prints that qualified form (e.g.
+# work/bench-$RUN_ID-1). The workspace target passed to the agent and to
+# `cs exec`/`cs llm session run -W` must use a name that resolves; the bare
+# `bench-...` name may not, so the run prompt names the sandbox with its folder
+# prefix (see step 3 of the runbook).
+
+# shellcheck source=/dev/null
+. "$RUN_DIR/run.env"
+: "${RUN_ID:?run.env must set RUN_ID}"
+: "${CONTEXT:?run.env must set CONTEXT}"
+: "${SUB_AGENT:?run.env must set SUB_AGENT}"
+
+command -v jq >/dev/null || { echo "jq is required to resolve launched session IDs" >&2; exit 1; }
+
+# The per-run agent (benchmark-sub-agent-$RUN_ID) is created fresh from
+# agents/benchmark-sub-agent.yaml in step 1 of the runbook, as a personal agent
+# so `cs llm session run --agent` resolves it. This script does not create it;
+# it only requires that it resolves. Creating it per run avoids reusing a stale
+# or non-resolving agent left over from a previous run or made in the UI.
+if ! cs llm agent show "$SUB_AGENT" >/dev/null 2>&1; then
+  echo "Agent $SUB_AGENT does not resolve; create it in step 1 before launching" >&2
+  exit 1
+fi
+
+pairs=$(awk -F'\t' -v c="$CASE" '$1 == c' "$RUN_DIR/runs.tsv")
+if [ -z "$pairs" ]; then
+  echo "No runs for case $CASE in $RUN_DIR/runs.tsv" >&2
+  exit 1
+fi
+
+model_for() {
+  awk -F'\t' -v s="$1" '$1 == s { print $2 }' "$RUN_DIR/models.tsv"
+}
+
+# Creates the sandbox, copies the kubeconfig in as the workspace user, and
+# checks that the run namespace is reachable from inside the sandbox.
+prepare_sandbox() {
+  local sandbox=$1 namespace=$2
+  cs sandbox create "$sandbox" -t "$SANDBOX_TEMPLATE" </dev/null &&
+    cs wait sandbox "$sandbox" --expect ready --timeout 10m </dev/null &&
+    cs exec -T -u "$WORKSPACE_UID" -W "$sandbox/$WORKSPACE" -- \
+      sh -c 'umask 077 && mkdir -p ~/.kube && cat > ~/.kube/config' <"$RUN_DIR/kubeconfig" &&
+    cs exec -T -u "$WORKSPACE_UID" -W "$sandbox/$WORKSPACE" -- \
+      kubectl --context "$CONTEXT" -n "$namespace" get all </dev/null
+}
+
+# Check every run of the case before creating anything.
+while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
+  if [ -z "$(model_for "$slug")" ]; then
+    echo "No model for $slug in $RUN_DIR/models.tsv" >&2
+    exit 1
+  fi
+  if [ ! -f "$RUN_DIR/$CASE/$slug/prompt.md" ]; then
+    echo "Missing $RUN_DIR/$CASE/$slug/prompt.md" >&2
+    exit 1
+  fi
+  if cs sandbox show "$sandbox" >/dev/null 2>&1 </dev/null; then
+    echo "Sandbox $sandbox already exists; it is not reused" >&2
+    exit 1
+  fi
+done 3<<<"$pairs"
+
+# Create all of the case's sandboxes first, so the sessions start back to back.
+while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
+  echo "Creating sandbox $sandbox for $CASE / $slug"
+  if ! prepare_sandbox "$sandbox" "$namespace"; then
+    echo "Sandbox $sandbox failed; creating it once more" >&2
+    cs sandbox remove "$sandbox" -f --skip-non-exist </dev/null
+    if ! prepare_sandbox "$sandbox" "$namespace"; then
+      echo "Sandbox $sandbox failed twice" >&2
+      exit 1
+    fi
+  fi
+done 3<<<"$pairs"
+
+parent_args=()
+if [ -n "${SANDBOX_LLM_SESSION_ID:-}" ]; then
+  parent_args=(--parent "$SANDBOX_LLM_SESSION_ID")
+fi
+
+while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
+  model=$(model_for "$slug")
+  session="bench-$RUN_ID-$CASE-$slug"
+  launched=$(date +%s)
+  # `cs llm session run` can exit non-zero with
+  # "Fatal: proto: invalid nil source message" yet still create the session, so
+  # its exit status is not trusted under set -e. Whether the session exists is
+  # decided below by resolving its ID; only that failing aborts the launch.
+  run_rc=0
+  cs llm session run @"$RUN_DIR/$CASE/$slug/prompt.md" \
+    ${parent_args[@]+"${parent_args[@]}"} \
+    --agent "$SUB_AGENT" \
+    --task \
+    --name "$session" \
+    --model-map CODING="$model" --model-map GENERIC="$model" --model-map FAST="$model" \
+    --approval auto \
+    -W "$sandbox/$WORKSPACE" \
+    --wait=false </dev/null || run_rc=$?
+  # Later steps address the session by ID, not by name. As a child of
+  # $SANDBOX_LLM_SESSION_ID its name is "sub-agent:$session"; run by hand
+  # without a parent it is top-level under "$session". The listing can lag the
+  # create, so poll briefly before deciding the session was not started.
+  session_id=
+  for _ in $(seq 1 10); do
+    session_id=$(cs llm session list ${parent_args[@]+"${parent_args[@]}"} -o json 2>/dev/null |
+      jq -r --arg a "sub-agent:$session" --arg b "$session" \
+        'first(.[] | select(.meta.name == $a or .meta.name == $b) | .meta.id) // empty' 2>/dev/null) || true
+    [ -n "$session_id" ] && break
+    sleep 3
+  done
+  if [ -z "$session_id" ]; then
+    echo "Error: session $session was not found after launch (cs llm session run exit $run_rc)" >&2
+    exit 1
+  fi
+  if [ "$run_rc" -ne 0 ]; then
+    echo "Note: cs llm session run exited $run_rc for $session, but the session was created ($session_id); continuing" >&2
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$CASE" "$slug" "$session" "${session_id:-}" "$sandbox" "$launched" >>"$RUN_DIR/launches.tsv"
+  echo "Started $session (${session_id:-unknown id}) on $model in $sandbox"
+done 3<<<"$pairs"
