@@ -1,0 +1,7 @@
+# benchmark-k8s-run sandbox definition
+# One sandbox per benchmark run, for the agent under test. It has no checkout of
+# this repository, so the case READMEs and manifests are not on disk. The
+# orchestrator copies a kubeconfig for the target cluster into ~/.kube/config
+# after the sandbox is ready.
+workspaces:
+  - name: app
