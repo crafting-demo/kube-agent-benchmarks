@@ -161,9 +161,9 @@ For every model of the case, the script:
 1. Confirms the run sandbox from `runs.tsv` does not exist yet, then creates it from the `benchmark-k8s-run` template and waits until it is ready.
 2. Copies `$RUN_DIR/kubeconfig` to `~/.kube/config` in the sandbox, as the workspace user, and confirms the run namespace is reachable from there. If either fails, it removes the sandbox and creates it once more.
 3. After every sandbox for the case is ready, starts the per-run agent (`$SUB_AGENT`) sessions back to back, so they begin under the same conditions. Each session is named `bench-$RUN_ID-<case>-<model-slug>`, maps every model purpose to the model under test, runs as a task with automatic approval in its run sandbox, and is started with `--parent=$SANDBOX_LLM_SESSION_ID` as a child of the orchestrator session. Crafting sets `SANDBOX_LLM_SESSION_ID` in the workspace agent's shell; when the script is run by hand outside a session, the variable is unset and the sessions start without a parent.
-4. Resolves each child session's ID from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` and records the session name, its ID, its sandbox, and its launch time in `$RUN_DIR/launches.tsv` (columns: `<case>`, `<model-slug>`, `<session name>`, `<session id>`, `<sandbox>`, `<launch time>`).
+4. Resolves each child session's ID from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` and records the session name, its ID, its sandbox, and its launch time in `$RUN_DIR/launches.tsv` (columns: `<case>`, `<model-slug>`, `<session name>`, `<session id>`, `<sandbox>`, `<launch time>`). The exit status of `cs llm session run` is not trusted: it can fail with `Fatal: proto: invalid nil source message` yet still create the session. The script polls the listing for up to about 30 seconds, treats the session as started if its ID resolves (printing a `Note:` with the exit code), and fails only if the session cannot be found.
 
-If the script fails, stop and report its output. Do not start sessions by hand for a case the script did not finish.
+If the script fails, stop and report its output. Do not start sessions by hand for a case the script did not finish. Before reporting, check `cs llm session list --parent $SANDBOX_LLM_SESSION_ID` for sessions the script did start: they are already running against their sandboxes, so report them by ID rather than leaving them untracked.
 
 After launch, confirm each run sandbox is actually reachable by the agent before trusting any result. The launch script's own reachability check runs at creation time; a sandbox can still be unreachable from the agent's workspace targeting moments later (for example a transient targeting or folder-prefix issue), in which case the agent stops almost immediately having done nothing. If an agent reports `sandbox <name> not found` (or any sandbox-targeting blocker), list sandboxes to check whether it exists under a different qualifier before concluding it is gone:
 
@@ -207,30 +207,35 @@ If a session stops waiting for input or approval, do not answer it: answering wo
 
 ## 6. Evaluate each run
 
-Evaluate each run as soon as its session stops, so the 60-second stability observation starts while the agent's changes are fresh. Judge every run with `agents/evaluation-rubric.md`: it defines the general criteria that apply to every case, how they combine with the case criteria into an overall result, and the measurements to record.
+Evaluate each run as soon as its session stops, so the 60-second stability observation starts while the agent's changes are fresh. Judge every run with `agents/evaluation-rubric.md`: it defines the general criteria that apply to every case, Overall success (whether the issue was fixed), the case score, and the measurements to record.
 
-Save the transcript first, in JSON for counting tool calls and as text for reading:
+The agent's transcript is never available: `cs llm session print` cannot address sub-agent child sessions (it returns `Session "..." not found`), and the session's `content.conversation` holds only its initial context. Do not try to save or read a transcript. The evidence for each run is the live cluster, the cluster-side change records, and the agent's final message (its hand-back), which by design carries a numbered verbatim command log and counts. The rubric's Evidence section explains how to weigh each of them.
+
+First, save the agent's final message verbatim as it arrived in this session to `$RUN_DIR/<case>/<model-slug>/final-message.md`, and save the child session's JSON record:
 
 ```bash
-cs llm session print <SESSION_ID> --print json > "$RUN_DIR/<case>/<model-slug>/transcript.jsonl"
-cs llm session print <SESSION_ID> > "$RUN_DIR/<case>/<model-slug>/transcript.txt"
+cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json > "$RUN_DIR/<case>/<model-slug>/session.json"
 ```
 
-Saving the transcript keeps it with the run: child sessions are removed when the orchestrator session is archived or deleted.
+`session.json` carries `content.status.state` and the `content.usage` token counts, and `content.model_mapping`, which confirms the model under test. Saving both keeps them with the run: child sessions are removed when the orchestrator session is archived or deleted.
 
-Known limitation: in some CLI builds `cs llm session print` cannot address a sub-agent child session by ID or by name and returns `Session "..." not found`, and the session's `content.conversation` field holds only its initial context, not the message history. When that happens the full transcript (and therefore exact tool-call and kubectl-command counts) is unavailable. In that case:
-
-- Record the token usage from `content.usage` in `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json` (fields `prompt_tokens`, `completion_tokens`, and when present `reasoning_tokens`, `cached_tokens`).
-- Judge diagnosis, approach, and reporting from the agent's final reply (its hand-back message) instead of the full transcript, and note in the evaluation that the transcript was unavailable so tool-call/kubectl counts are not reported.
-- Treat the live cluster state as authoritative for Goal achieved, Deployment recovery, Stability, and HTTP behaviour, since those can be verified directly regardless of the transcript.
-
-For the case criteria, use the case README's `## Manual evaluation` section: its criteria table and its operator checks, with the case's default namespace replaced by the run namespace.
+For the case criteria, use the case README's `## Manual evaluation` section: its criteria table and its operator checks, with the case's default namespace replaced by the run namespace. Save the output of every check to `$RUN_DIR/<case>/<model-slug>/operator-checks.txt`.
 
 - Run the checks non-interactively. Instead of `--watch`, record Pod readiness and restart counts, wait 60 seconds, and record them again.
 - For HTTP checks, run `kubectl port-forward` in the background on a local port unique to the run, make the request, then stop the port-forward.
-- Judge criteria about diagnosis, approach, and reporting from the transcript.
 
-Check integrity in the transcript. Flag the run if the agent read files from the kube-agent-benchmarks repository, used any sandbox other than its own run sandbox, or read or changed another run's namespace. Any of these also makes the rubric's Stayed in scope criterion No.
+Also record the cluster-side change records for the namespace in `operator-checks.txt`, so the agent's reported changes can be checked against them:
+
+```bash
+kubectl get events -n <NAMESPACE> --sort-by=.lastTimestamp
+kubectl rollout history deployment/<NAME> -n <NAMESPACE>   # for each Deployment in the case
+kubectl get rs -n <NAMESPACE> -o wide
+kubectl get <changed objects> -n <NAMESPACE> --show-managed-fields -o yaml
+```
+
+Compare these with the command log in the final message: every revision, recreated object, and changed field should match a `[change]` entry, and every `[change]` entry should appear on the cluster.
+
+Judge criteria about diagnosis, approach, and reporting from the final message, checked against these records. Check integrity from the command log: flag the run if it shows the agent reading files from the kube-agent-benchmarks repository, using any sandbox other than its own run sandbox, or reading or changing another run's namespace. Any of these also makes the rubric's Stayed in scope criterion No. If the final message has no complete command log, apply the rubric's `incomplete self-report` rule instead of assuming the run stayed in scope.
 
 Use the session ID recorded in `$RUN_DIR/launches.tsv` (from `cs llm session list --parent $SANDBOX_LLM_SESSION_ID -o json`), then collect the measurements as the rubric describes. If any model other than the one under test appears in the token usage, mark the run invalid.
 
@@ -273,7 +278,7 @@ For `persistent-storage-failure`, then check for PersistentVolumes left behind b
 kubectl get pv -o jsonpath='{range .items[?(@.spec.claimRef.name=="store-demo-data")]}{.metadata.name}{"\t"}{.spec.claimRef.namespace}{"\t"}{.status.phase}{"\n"}{end}'
 ```
 
-Leave the agent sessions and the orchestrator sandbox in place; `$RUN_DIR`, with the saved transcripts, is the record of the run.
+Leave the agent sessions and the orchestrator sandbox in place; `$RUN_DIR`, with the saved final messages, session records, and operator checks, is the record of the run.
 
 ### What is removed and what is kept
 
@@ -293,7 +298,7 @@ Removed by cleanup (only when the user did not ask to keep resources):
 Kept on purpose:
 
 - The orchestrator sandbox (the one running this runbook). Cleanup never removes it.
-- `$RUN_DIR` (`~/benchmark-runs/$RUN_ID/`): prompts, any saved transcripts, per-run `evaluation.md`, and `report.md`. This is the durable record and must survive cleanup.
+- `$RUN_DIR` (`~/benchmark-runs/$RUN_ID/`): prompts, each run's `final-message.md`, `session.json`, `operator-checks.txt`, and `evaluation.md`, and `report.md`. This is the durable record and must survive cleanup.
 - The shared setup that outlives any single run: the `benchmark-k8s-run` template. Do not delete it as part of a run.
 - The sub-agent (child) sessions. See their lifecycle below.
 
@@ -302,7 +307,7 @@ Kept on purpose:
 The sub-agent sessions are children of the orchestrator session and are not individually deletable: `cs llm session remove` does not resolve a child by its `sub-agent:bench-...` name or by its ID. Their lifecycle is tied to the orchestrator session — they are removed when the orchestrator session is archived or deleted. Two consequences:
 
 - Do not rely on deleting child sessions during cleanup; leave them with the orchestrator session.
-- Because the sessions (and any transcript still only inside them) disappear with the orchestrator session, step 6 must have already written tokens, evidence, and `report.md` into `$RUN_DIR`. Do not archive or delete the orchestrator session until the run's record in `$RUN_DIR` is complete.
+- Because the sessions disappear with the orchestrator session, step 6 must have already written each final message, tokens, evidence, and `report.md` into `$RUN_DIR`. Do not archive or delete the orchestrator session until the run's record in `$RUN_DIR` is complete.
 
 
 ## 8. Report
@@ -326,11 +331,11 @@ Begin the report by stating it is for run ID `$RUN_ID`, and title the saved repo
 | No dangerous operations | Yes | Yes | Yes |
 | <case criterion from the README> | Yes | No | Yes |
 | ... | | | |
-| **Case score** | **100%** | **71%** | **86%** |
+| **Case score** | **100%** | **58%** | **92%** |
 | Time to run | 250 s | 600 s (incomplete) | 405 s |
 | Input / output tokens | ... | ... | ... |
 | Cost | $... | $... | $... |
-| Tool calls / kubectl commands | ... | ... | ... |
+| Tool calls / kubectl commands (self-reported) | ... | ... | ... |
 | Flags | | read repository files | |
 
 **Best on this case:** <model>, <one-sentence reason>. (Omit this line when only one model ran; there is nothing to compare.)
@@ -339,4 +344,4 @@ Begin the report by stating it is for run ID `$RUN_ID`, and title the saved repo
 - ...
 ```
 
-With a single model, the per-case table has just that one model column, and there is no ranking or "Best on this case" line; report the model's own result, measurements, and any flags. With two or more models, rank them within a case as the rubric's Ranking section describes. Explain each No and N/A in the notes, with its evidence, and point out runs that were flagged, invalid, or incomplete. End with a short summary across cases only if more than one case ran.
+With a single model, the per-case table has just that one model column, and there is no ranking or "Best on this case" line; report the model's own result, measurements, and any flags. Overall success states only whether the issue was fixed on the live cluster; approach, reporting, scope, and safety are reflected in the case score and the notes. With two or more models, rank them within a case as the rubric's Ranking section describes. Explain each No and N/A in the notes, with its evidence, and point out runs that were flagged, invalid, or incomplete. End with a short summary across cases only if more than one case ran.

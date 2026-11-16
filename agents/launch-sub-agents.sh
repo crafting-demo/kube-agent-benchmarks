@@ -41,6 +41,8 @@ WORKSPACE_UID=1000
 : "${CONTEXT:?run.env must set CONTEXT}"
 : "${SUB_AGENT:?run.env must set SUB_AGENT}"
 
+command -v jq >/dev/null || { echo "jq is required to resolve launched session IDs" >&2; exit 1; }
+
 # The per-run agent (benchmark-sub-agent-$RUN_ID) is created fresh from
 # agents/benchmark-sub-agent.yaml in step 1 of the runbook, as a personal agent
 # so `cs llm session run --agent` resolves it. This script does not create it;
@@ -111,6 +113,11 @@ while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
   model=$(model_for "$slug")
   session="bench-$RUN_ID-$CASE-$slug"
   launched=$(date +%s)
+  # `cs llm session run` can exit non-zero with
+  # "Fatal: proto: invalid nil source message" yet still create the session, so
+  # its exit status is not trusted under set -e. Whether the session exists is
+  # decided below by resolving its ID; only that failing aborts the launch.
+  run_rc=0
   cs llm session run @"$RUN_DIR/$CASE/$slug/prompt.md" \
     ${parent_args[@]+"${parent_args[@]}"} \
     --agent "$SUB_AGENT" \
@@ -119,17 +126,26 @@ while IFS=$'\t' read -r -u 3 _ slug namespace sandbox; do
     --model-map CODING="$model" --model-map GENERIC="$model" --model-map FAST="$model" \
     --approval auto \
     -W "$sandbox/$WORKSPACE" \
-    --wait=false </dev/null
-  # The child session is addressed later by ID, not by name, so resolve and
-  # record it. It is a child of $SANDBOX_LLM_SESSION_ID with display name
-  # "sub-agent:$session". `cs llm session run` can print
-  # "Fatal: proto: invalid nil source message" to stderr yet still create the
-  # session; guard the id resolution so a benign failure here does not abort the
-  # script (set -e) before launches.tsv is written.
-  session_id=$(cs llm session list --parent "${SANDBOX_LLM_SESSION_ID:-}" -o json 2>/dev/null |
-    awk -v n="sub-agent:$session" '
-      /"id"/ { gsub(/[",]/,""); id=$2 }
-      index($0, n) { print id; exit }') || true
+    --wait=false </dev/null || run_rc=$?
+  # Later steps address the session by ID, not by name. As a child of
+  # $SANDBOX_LLM_SESSION_ID its name is "sub-agent:$session"; run by hand
+  # without a parent it is top-level under "$session". The listing can lag the
+  # create, so poll briefly before deciding the session was not started.
+  session_id=
+  for _ in $(seq 1 10); do
+    session_id=$(cs llm session list ${parent_args[@]+"${parent_args[@]}"} -o json 2>/dev/null |
+      jq -r --arg a "sub-agent:$session" --arg b "$session" \
+        'first(.[] | select(.meta.name == $a or .meta.name == $b) | .meta.id) // empty' 2>/dev/null) || true
+    [ -n "$session_id" ] && break
+    sleep 3
+  done
+  if [ -z "$session_id" ]; then
+    echo "Error: session $session was not found after launch (cs llm session run exit $run_rc)" >&2
+    exit 1
+  fi
+  if [ "$run_rc" -ne 0 ]; then
+    echo "Note: cs llm session run exited $run_rc for $session, but the session was created ($session_id); continuing" >&2
+  fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$CASE" "$slug" "$session" "${session_id:-}" "$sandbox" "$launched" >>"$RUN_DIR/launches.tsv"
   echo "Started $session (${session_id:-unknown id}) on $model in $sandbox"
 done 3<<<"$pairs"
